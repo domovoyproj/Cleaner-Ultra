@@ -187,11 +187,14 @@ fn video_cache_cleanup_preserves_unowned_files_and_journal() {
         .unwrap();
     let unowned = f.library.thumbs.join("personal.webm");
     fs::write(&unowned, b"keep").unwrap();
+    let unowned_jpeg = f.library.thumbs.join("personal.jpg");
+    fs::write(&unowned_jpeg, b"keep this photo").unwrap();
     let note = f.library.data.join("journal-note");
     fs::write(&note, b"keep").unwrap();
     f.library.trim_cache().unwrap();
     assert!(!owned.exists());
     assert_eq!(fs::read(unowned).unwrap(), b"keep");
+    assert_eq!(fs::read(unowned_jpeg).unwrap(), b"keep this photo");
     assert!(note.exists());
     assert!(f.library.data.join("library.sqlite3").exists());
 }
@@ -590,6 +593,47 @@ fn export_is_verified_and_exclusive() {
     assert!(source.exists());
 }
 #[test]
+fn export_hash_failure_leaves_no_published_or_partial_file() {
+    let f = Fixture::new();
+    let source = f.image("one.jpg", 0);
+    f.scan();
+    let id = f.photos("all")[0]["id"].as_i64().unwrap();
+    fs::write(&source, b"changed after indexing").unwrap();
+    let out = f._temp.path().join("export");
+    let result = f
+        .library
+        .export(&[id], out.to_str().unwrap(), false)
+        .unwrap();
+    assert_eq!(result["done"], 0);
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+    assert!(!out.join("one.jpg").exists());
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+    assert_eq!(fs::read(source).unwrap(), b"changed after indexing");
+}
+#[test]
+fn export_preserves_both_occupied_names() {
+    let f = Fixture::new();
+    f.image("one.jpg", 0);
+    f.scan();
+    let id = f.photos("all")[0]["id"].as_i64().unwrap();
+    let out = f._temp.path().join("export");
+    fs::create_dir(&out).unwrap();
+    fs::write(out.join("one.jpg"), b"first").unwrap();
+    fs::write(out.join(format!("one_{id}.jpg")), b"second").unwrap();
+    let result = f
+        .library
+        .export(&[id], out.to_str().unwrap(), false)
+        .unwrap();
+    assert_eq!(result["done"], 0);
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read(out.join("one.jpg")).unwrap(), b"first");
+    assert_eq!(
+        fs::read(out.join(format!("one_{id}.jpg"))).unwrap(),
+        b"second"
+    );
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 2);
+}
+#[test]
 fn paused_queue_survives_restart() {
     let f = Fixture::new();
     for i in 0..60 {
@@ -610,6 +654,210 @@ fn paused_queue_survives_restart() {
     }
     assert_eq!(next.listing("all", "", 0, "name").unwrap()["total"], 60);
     next.close();
+}
+#[test]
+fn scan_batches_keep_counts_and_skip_unchanged_grouping() {
+    let f = Fixture::new();
+    for i in 0..20 {
+        f.image(&format!("{i:03}.jpg"), i);
+    }
+    f.scan();
+    let db = f.db();
+    let first: (i64, i64, i64) = db
+        .query_row(
+            "SELECT done,total,errors FROM jobs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(first, (20, 20, 0));
+    let done_rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM scan_queue WHERE state='done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(done_rows, 0);
+    let id: i64 = db
+        .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    db.execute("UPDATE photos SET similar=NULL WHERE id=?", [id])
+        .unwrap();
+    drop(db);
+    f.scan();
+    let db = f.db();
+    let second: (i64, i64, i64, i64) = db
+        .query_row(
+            "SELECT done,total,errors,changed FROM jobs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(second, (20, 20, 0, 0));
+    let similar: Option<i64> = db
+        .query_row("SELECT similar FROM photos WHERE id=?", [id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(similar, None);
+    let index: Vec<String> = db
+        .prepare("PRAGMA index_info(queue_pending_path)")
+        .unwrap()
+        .query_map([], |r| r.get(2))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(index, ["job", "state", "path"]);
+}
+
+#[test]
+fn restored_missing_file_rejoins_groups_without_metadata_change() {
+    let f = Fixture::new();
+    let original = f.image("returned.jpg", 9);
+    f.scan();
+    let parked = f._temp.path().join("returned-parked.jpg");
+    fs::rename(&original, &parked).unwrap();
+    f.scan();
+    let db = f.db();
+    let missing: i64 = db
+        .query_row(
+            "SELECT missing FROM photos WHERE name='returned.jpg'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(missing, 1);
+    drop(db);
+    fs::rename(&parked, &original).unwrap();
+    f.scan();
+    let db = f.db();
+    let restored: (i64, Option<i64>) = db
+        .query_row(
+            "SELECT missing,similar FROM photos WHERE name='returned.jpg'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let changed: i64 = db
+        .query_row(
+            "SELECT changed FROM jobs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(restored.0, 0);
+    assert!(restored.1.is_some());
+    assert_eq!(changed, 1);
+}
+
+#[test]
+fn retry_scan_errors_processes_only_selected_files() {
+    let f = Fixture::new();
+    let good = f.image("good.jpg", 1);
+    let bad = f.root.join("bad.jpg");
+    fs::write(&bad, b"not an image").unwrap();
+    f.library.start(f.root.to_str().unwrap(), false).unwrap();
+    f.wait();
+    let errors = f.library.scan_errors(100, 0).unwrap();
+    assert_eq!(errors["total"], 1);
+    assert_eq!(
+        f.library.scan_errors(1, 1).unwrap()["errors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let failed_path = errors["errors"][0]["path"].as_str().unwrap().to_string();
+    assert_eq!(PathBuf::from(&failed_path).file_name().unwrap(), "bad.jpg");
+    assert!(good.exists());
+    f.image("bad.jpg", 2);
+    f.db()
+        .execute(
+            "UPDATE jobs SET state='paused' WHERE id=?",
+            [errors["job"].as_i64().unwrap()],
+        )
+        .unwrap();
+    assert!(f.library.retry_scan_errors(&[failed_path.clone()]).is_err());
+    f.db()
+        .execute(
+            "UPDATE jobs SET state='complete' WHERE id=?",
+            [errors["job"].as_i64().unwrap()],
+        )
+        .unwrap();
+    let retry = f.library.retry_scan_errors(&[failed_path]).unwrap();
+    assert_eq!(retry["queued"], 1);
+    f.wait();
+    assert_eq!(f.library.scan_errors(100, 0).unwrap()["total"], 0);
+    let db = f.db();
+    let counts: (i64, i64, i64) = db
+        .query_row(
+            "SELECT done,total,errors FROM jobs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (2, 2, 0));
+    assert_eq!(f.photos("all").len(), 2);
+}
+
+#[test]
+fn scan_errors_are_paginated_without_losing_paths() {
+    let f = Fixture::new();
+    f.image("good.jpg", 1);
+    fs::write(f.root.join("bad-a.jpg"), b"invalid a").unwrap();
+    fs::write(f.root.join("bad-b.jpg"), b"invalid b").unwrap();
+    f.library.start(f.root.to_str().unwrap(), false).unwrap();
+    f.wait();
+    let first = f.library.scan_errors(1, 0).unwrap();
+    let second = f.library.scan_errors(1, 1).unwrap();
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(second["errors"].as_array().unwrap().len(), 1);
+    assert_ne!(first["errors"][0]["path"], second["errors"][0]["path"]);
+    assert_eq!(first["retry_allowed"], true);
+}
+
+#[test]
+fn old_scan_errors_cannot_replay_an_obsolete_generation() {
+    let f = Fixture::new();
+    f.image("good.jpg", 1);
+    let bad = f.root.join("bad.jpg");
+    fs::write(&bad, b"not an image").unwrap();
+    f.library.start(f.root.to_str().unwrap(), false).unwrap();
+    f.wait();
+    let old_path = f.library.scan_errors(10, 0).unwrap()["errors"][0]["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::remove_file(bad).unwrap();
+    f.scan();
+    assert_eq!(f.library.scan_errors(10, 0).unwrap()["total"], 0);
+    assert!(f.library.retry_scan_errors(&[old_path]).is_err());
+    assert_eq!(f.photos("all").len(), 1);
+}
+
+#[test]
+fn search_matches_cyrillic_names_independent_of_case() {
+    let f = Fixture::new();
+    f.image("Семья.jpg", 3);
+    f.scan();
+    assert_eq!(
+        f.library.listing("all", "СЕМЬЯ", 0, "name").unwrap()["total"],
+        1
+    );
+    assert_eq!(
+        f.library.listing("all", "семья", 0, "name").unwrap()["total"],
+        1
+    );
+    f.db()
+        .execute("UPDATE photos SET search_name=''", [])
+        .unwrap();
+    f.library.close();
+    let reopened = Library::open(&f.library.data).unwrap();
+    assert_eq!(
+        reopened.listing("all", "СеМьЯ", 0, "name").unwrap()["total"],
+        1
+    );
+    reopened.close();
 }
 #[test]
 fn crash_recovery_preserves_source_or_target() {
@@ -647,6 +895,139 @@ fn crash_recovery_preserves_source_or_target() {
     );
 }
 #[test]
+fn recovery_preserves_valid_copy_when_source_was_replaced() {
+    let f = Fixture::new();
+    let source = f.image("one.jpg", 0);
+    f.scan();
+    let photo = f
+        .library
+        .photo(f.photos("all")[0]["id"].as_i64().unwrap())
+        .unwrap();
+    let target = f.root.join(".photosort-trash/recover.jpg");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::copy(&source, &target).unwrap();
+    f.db()
+        .execute(
+            "INSERT INTO operations(photo,source,destination,kind) VALUES(?,?,?,'trash')",
+            params![photo.id, source.to_string_lossy(), target.to_string_lossy()],
+        )
+        .unwrap();
+    fs::write(&source, b"new content at original path").unwrap();
+    for _ in 0..2 {
+        f.library.recover().unwrap();
+        assert_eq!(analysis::fingerprint(&target).unwrap(), photo.hash);
+        assert_eq!(fs::read(&source).unwrap(), b"new content at original path");
+        let state: String = f
+            .db()
+            .query_row("SELECT state FROM operations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "pending");
+    }
+    assert_eq!(
+        f.library
+            .move_photos(&[photo.id], false)
+            .unwrap()
+            .errors
+            .len(),
+        1
+    );
+    f.library.close();
+    let reopened = Library::open(&f.library.data).unwrap();
+    assert_eq!(analysis::fingerprint(&target).unwrap(), photo.hash);
+    reopened.close();
+}
+#[test]
+fn recovery_continues_past_corrupt_copy_without_deleting_it() {
+    let f = Fixture::new();
+    let first = f.image("first.jpg", 0);
+    let second = f.image("second.jpg", 1);
+    f.scan();
+    let first_id = f
+        .photos("all")
+        .iter()
+        .find(|p| p["name"] == "first.jpg")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let second_id = f
+        .photos("all")
+        .iter()
+        .find(|p| p["name"] == "second.jpg")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let trash = f.root.join(".photosort-trash");
+    fs::create_dir_all(&trash).unwrap();
+    let corrupt = trash.join("corrupt.jpg");
+    fs::write(&corrupt, b"not the indexed photo").unwrap();
+    let valid = trash.join("valid.jpg");
+    fs::rename(&second, &valid).unwrap();
+    for (id, source, target) in [(first_id, &first, &corrupt), (second_id, &second, &valid)] {
+        f.db()
+            .execute(
+                "INSERT INTO operations(photo,source,destination,kind) VALUES(?,?,?,'trash')",
+                params![id, source.to_string_lossy(), target.to_string_lossy()],
+            )
+            .unwrap();
+    }
+    f.library.recover().unwrap();
+    assert!(first.exists());
+    assert_eq!(fs::read(&corrupt).unwrap(), b"not the indexed photo");
+    assert!(!second.exists());
+    assert_eq!(
+        f.library.photo(second_id).unwrap().trash.as_deref(),
+        valid.to_str()
+    );
+    let states: Vec<String> = f
+        .db()
+        .prepare("SELECT state FROM operations ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(states, ["pending", "done"]);
+}
+#[test]
+fn interrupted_restore_never_overwrites_replacement() {
+    let f = Fixture::new();
+    let original = f.image("one.jpg", 0);
+    f.scan();
+    let id = f.photos("all")[0]["id"].as_i64().unwrap();
+    assert!(
+        f.library
+            .move_photos(&[id], false)
+            .unwrap()
+            .errors
+            .is_empty()
+    );
+    let photo = f.library.photo(id).unwrap();
+    let trash = PathBuf::from(photo.trash.as_ref().unwrap());
+    f.db()
+        .execute(
+            "INSERT INTO operations(photo,source,destination,kind) VALUES(?,?,?,'restore')",
+            params![id, trash.to_string_lossy(), original.to_string_lossy()],
+        )
+        .unwrap();
+    fs::write(&original, b"different photo at original path").unwrap();
+    f.library.recover().unwrap();
+    assert_eq!(analysis::fingerprint(&trash).unwrap(), photo.hash);
+    assert_eq!(
+        fs::read(&original).unwrap(),
+        b"different photo at original path"
+    );
+    assert_eq!(f.library.move_photos(&[id], true).unwrap().errors.len(), 1);
+    let state: String = f
+        .db()
+        .query_row(
+            "SELECT state FROM operations WHERE kind='restore'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "pending");
+}
+#[test]
 fn raw_jpeg_pair_selection() {
     let f = Fixture::new();
     let jpeg = f.image("capture.jpg", 0);
@@ -664,6 +1045,31 @@ fn raw_jpeg_pair_selection() {
     assert!(!jpeg.exists() && !raw.exists());
     f.library.undo().unwrap();
     assert!(jpeg.exists() && raw.exists());
+}
+
+#[test]
+fn duplicate_apply_moves_only_confirmed_ids_even_with_raw_pair() {
+    let f = Fixture::new();
+    let jpeg = f.image("capture.jpg", 0);
+    let duplicate = f.root.join("duplicate.jpg");
+    fs::copy(&jpeg, &duplicate).unwrap();
+    f.scan();
+    let jpeg_id = f
+        .photos("all")
+        .iter()
+        .find(|p| p["name"] == "capture.jpg")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let p = f.library.photo(jpeg_id).unwrap();
+    let raw = f.root.join("capture.dng");
+    fs::copy(&jpeg, &raw).unwrap();
+    f.db().execute("INSERT INTO photos(path,root,name,size,mtime,width,height,hash,dhash,sharpness,asset_group) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![raw.to_string_lossy(),p.root,"capture.dng",p.size,p.mtime,p.width,p.height,p.hash,p.dhash,p.sharpness,p.asset_group]).unwrap();
+    let outcome = f.library.apply_duplicates(&[jpeg_id]).unwrap();
+    assert_eq!(outcome.done, [jpeg_id]);
+    assert!(!jpeg.exists());
+    assert!(raw.exists());
+    assert!(duplicate.exists());
 }
 #[test]
 fn settings_and_review_persist() {
@@ -863,7 +1269,7 @@ fn cache_budget_evicts_only_previews() {
     let note = f.library.thumbs.join("notes.txt");
     fs::write(&note, b"preserve non-preview files").unwrap();
     for i in 0..3 {
-        let file = fs::File::create(f.library.thumbs.join(format!("large-{i}.jpg"))).unwrap();
+        let file = fs::File::create(f.library.thumbs.join(format!("{:064x}.jpg", i + 1))).unwrap();
         file.set_len(16 * 1024 * 1024).unwrap();
     }
     let mut settings = f.library.settings();
@@ -891,7 +1297,7 @@ fn cache_remains_bounded_during_preview_regeneration() {
     settings.cache_mb = 32;
     f.library.save_settings(settings).unwrap();
     for i in 0..3 {
-        let file = fs::File::create(f.library.thumbs.join(format!("old-{i}.jpg"))).unwrap();
+        let file = fs::File::create(f.library.thumbs.join(format!("{:064x}.jpg", i + 1))).unwrap();
         file.set_len(16 * 1024 * 1024).unwrap();
     }
     let thumbnail = f.library.thumbs.join(format!("{}.jpg", photo.hash));
@@ -907,4 +1313,66 @@ fn cache_remains_bounded_during_preview_regeneration() {
         .map(|entry| entry.unwrap().metadata().unwrap().len())
         .sum();
     assert!(size <= 32 * 1024 * 1024);
+}
+
+#[test]
+fn duplicate_plan_exposes_all_files_with_hash_and_size() {
+    let f = Fixture::new();
+    let original = f.image("original.jpg", 7);
+    for index in 0..102 {
+        fs::copy(&original, f.root.join(format!("copy-{index:03}.jpg"))).unwrap();
+    }
+    f.scan();
+    let plan = f.library.duplicate_plan("").unwrap();
+    let keep = plan["keep"].as_array().unwrap();
+    let remove = plan["remove"].as_array().unwrap();
+    assert_eq!(keep.len(), 1);
+    assert_eq!(remove.len(), 102);
+    assert!(keep.iter().chain(remove).all(|item| {
+        item["hash"].as_str().is_some_and(|hash| !hash.is_empty())
+            && item["size"].as_i64().is_some_and(|size| size > 0)
+    }));
+}
+
+#[test]
+fn culling_group_respects_selected_root() {
+    let f = Fixture::new();
+    let first = f.image("first.jpg", 8);
+    fs::copy(&first, f.root.join("second.jpg")).unwrap();
+    f.scan();
+    let other_root = f._temp.path().join("other-root");
+    fs::create_dir(&other_root).unwrap();
+    fs::copy(&first, other_root.join("third.jpg")).unwrap();
+    fs::copy(&first, other_root.join("fourth.jpg")).unwrap();
+    f.library
+        .start(other_root.to_str().unwrap(), false)
+        .unwrap();
+    f.wait();
+    let all = f.photos("all");
+    let first_root = all.iter().find(|item| item["name"] == "first.jpg").unwrap()["root"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let other_root = all.iter().find(|item| item["name"] == "third.jpg").unwrap()["root"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_group = f
+        .library
+        .next_group_filtered("duplicates", &first_root)
+        .unwrap();
+    let other_group = f
+        .library
+        .next_group_filtered("duplicates", &other_root)
+        .unwrap();
+    assert_eq!(first_group["photos"].as_array().unwrap().len(), 2);
+    assert_eq!(other_group["photos"].as_array().unwrap().len(), 2);
+    assert_eq!(first_group["total"], 1);
+    assert_eq!(other_group["total"], 1);
+    assert_eq!(
+        f.library
+            .next_group_filtered("duplicates", "missing-root")
+            .unwrap()["total"],
+        0
+    );
 }

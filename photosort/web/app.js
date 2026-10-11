@@ -55,6 +55,12 @@ const state = {
   request: 0,
   busy: false,
   culling: false,
+  duplicatePlan: null,
+  duplicateSelected: new Set(),
+  duplicateVisible: 200,
+  scanErrorsRetryAllowed: false,
+  reviewRequest: 0,
+  reviewUpdatedAt: 0,
   viewerPhotos: [],
   viewerIndex: 0,
   settings: {
@@ -90,6 +96,7 @@ const size = (value) =>
     : value >= 1e6
       ? `${(value / 1e6).toFixed(1)} МБ`
       : `${Math.max(1, Math.round(value / 1024))} КБ`;
+const planSize = (value) => Number(value) > 0 ? size(value) : "0 Б";
 let toastTimer,
   searchTimer,
   saveTimer,
@@ -172,6 +179,7 @@ async function status() {
   rootFilter.value = roots.includes(previousRoot) ? previousRoot : "";
   rootFilter.hidden = roots.length < 2 && !rootFilter.value;
   rootFilter.title = rootFilter.value || "Показывать файлы из папки";
+  updateReviewScope();
   applyTheme();
   $("#undo").disabled = !info.undo;
   $("#undo").title = info.undo
@@ -180,6 +188,10 @@ async function status() {
   $("#codec-note").textContent = info.codecs
     ? "JPEG · PNG · TIFF · WEBP · HEIC · RAW. RAW+JPEG выбираются и экспортируются вместе."
     : "Для HEIC и RAW требуется комплект локальных декодеров из полной сборки.";
+  $("#pending-operations").hidden = !info.pending_operations;
+  $("#pending-operations").textContent = info.pending_operations
+    ? `${number(info.pending_operations)} незавершённых операций переноса требуют проверки. Исходные файлы и копии сохранены.`
+    : "";
   progress(info.progress);
   return info;
 }
@@ -379,22 +391,76 @@ async function load() {
     $("#review-progress").textContent = data.counts.all
       ? `Осталось разобрать: ${number(data.counts.pending)}`
       : "";
+    $("#quick-review-count").textContent = data.counts.all
+      ? `${number(data.counts.similar)} похожих · ${number(data.counts.duplicates)} точных дублей`
+      : "Похожие группы появятся после сканирования";
     progress(data.progress);
     updateSelection();
+    if (data.counts.similar && !data.progress.running) refreshQuickReview();
+    else if (!data.counts.similar) clearQuickReview();
   } catch (error) {
     toast(`Не удалось загрузить библиотеку: ${error.message}`);
   }
 }
 function progress(data) {
   state.running = data.running;
-  $("#scan-status").hidden = !data.running && !data.paused;
+  $("#scan-status").hidden = !data.running && !data.paused && !data.errors;
   $("#scan-text").textContent =
-    `${data.paused ? "На паузе · " : ""}Обработано: ${number(data.done)}${data.total ? ` из ${number(data.total)}` : ""}`;
+    `${data.paused ? "Пауза · " : data.running ? "Сканирование · " : "Готово · "}${number(data.done)}${data.total ? ` из ${number(data.total)}` : ""}`;
   $("#scan-detail").textContent =
     `${data.message}${data.errors ? ` · ошибок: ${data.errors}` : ""}`;
+  const percent = data.total ? Math.min(100, Math.round((100 * data.done) / data.total)) : 0;
+  $("#scan-progress-fill").style.width = `${percent}%`;
+  $("#scan-percent").textContent = `${percent}%`;
+  $(".scan-progress-track").setAttribute("aria-valuenow", String(percent));
+  $("#scan-errors-button").hidden = !data.errors;
+  $("#scan-errors-button").textContent = `${number(data.errors)} ${data.errors === 1 ? "ошибка" : "ошибок"}`;
   $("#stop-scan").hidden = !data.running;
   $("#resume-scan").hidden = !data.paused;
   $("#scan-status").classList.toggle("paused", data.paused);
+}
+function clearQuickReview(message = "Добавьте папку, чтобы найти похожие кадры и серии.") {
+  state.reviewRequest++;
+  $("#quick-review-items").replaceChildren();
+  $("#quick-review-hint").textContent = message;
+  $("#quick-group-progress").textContent = "";
+  $("#quick-review-open").disabled = true;
+}
+function updateReviewScope() {
+  const root = $("#root-filter").value;
+  const short = root.replaceAll("\\", "/").split("/").filter(Boolean).slice(-2).join("/");
+  $("#review-scope").textContent = root ? `Область: ${short}` : "Область: все папки";
+  $("#review-scope").title = root;
+}
+async function refreshQuickReview(force = false) {
+  if (!force && Date.now() - state.reviewUpdatedAt < 8000) return;
+  state.reviewUpdatedAt = Date.now();
+  const request = ++state.reviewRequest;
+  const root = $("#root-filter").value;
+  try {
+    const query = new URLSearchParams({ kind: "similar", root });
+    const group = await api(`/api/group?${query}`);
+    if (request !== state.reviewRequest || root !== $("#root-filter").value) return;
+    const photos = visibleAssets(group.photos || []).slice(0, 2);
+    $("#quick-review-items").replaceChildren(...photos.map((photo) => {
+      const item = element("div", "quick-review-item");
+      const image = element("img");
+      image.src = `/media/${photo.id}`;
+      image.alt = photo.name;
+      image.loading = "lazy";
+      item.append(image, element("strong", "", photo.name), element("small", "", size(photo.size)));
+      return item;
+    }));
+    $("#quick-group-progress").textContent = group.total && group.remaining
+      ? `${number(group.total - group.remaining + 1)} из ${number(group.total)}` : "";
+    $("#quick-review-hint").textContent = photos.length
+      ? "Сравните всю группу и выберите лучший кадр. Исходные файлы остаются на месте."
+      : "Все найденные похожие группы уже просмотрены.";
+    $("#quick-review-open").disabled = !photos.length;
+  } catch (_) {
+    if (request === state.reviewRequest)
+      clearQuickReview("Не удалось загрузить группу. Попробуйте открыть разбор ещё раз.");
+  }
 }
 function setView(viewName, save = true) {
   state.view = viewName;
@@ -512,6 +578,21 @@ function stopVideos() {
     player.load();
   }
 }
+function updateVideoSamples() {
+  const players = [...document.querySelectorAll("#viewer video")];
+  const ready = !$("#video-toolbar").hidden && players.length === 2 &&
+    players.every((player) => Number.isFinite(player.duration) && player.duration > 0);
+  $("#video-samples").querySelectorAll("button").forEach((button) => button.disabled = !ready);
+}
+$("#video-samples").onclick = (event) => {
+  const button = event.target.closest("button[data-scene]");
+  if (!button || button.disabled) return;
+  const fraction = Number(button.dataset.scene);
+  for (const player of document.querySelectorAll("#viewer video")) {
+    player.pause();
+    player.currentTime = Math.min(player.duration, Math.max(0, player.duration * fraction));
+  }
+};
 function videoFigure(photo) {
   const figure = element("figure", "video-figure");
   const player = element("video", "video-player");
@@ -522,6 +603,8 @@ function videoFigure(photo) {
   player.setAttribute("aria-label", `Воспроизвести ${photo.name}`);
   player.poster = `/media/${photo.id}`;
   player.src = `/video/${photo.id}`;
+  player.onloadedmetadata = updateVideoSamples;
+  player.ondurationchange = updateVideoSamples;
   const message = element("p", "video-status", "");
   message.setAttribute("role", "status");
   player.onerror = () => {
@@ -616,6 +699,7 @@ function showPhotos(photos, index = 0) {
   );
   $("#video-toolbar").hidden =
     photos.length !== 2 || photos.some((photo) => photo.media_kind !== "video");
+  updateVideoSamples();
   $("#viewer-favorite").hidden = state.comparing || state.culling;
   $("#viewer-favorite").textContent = photos[0].favorite
     ? "♥ В избранном"
@@ -648,7 +732,11 @@ function showPhotos(photos, index = 0) {
   if (!$("#viewer").open) $("#viewer").showModal();
 }
 async function nextGroup() {
-  const data = await api(`/api/group?kind=${state.cullKind}`);
+  const query = new URLSearchParams({
+    kind: state.cullKind,
+    root: $("#root-filter").value,
+  });
+  const data = await api(`/api/group?${query}`);
   state.group = data;
   if (!data.photos.length) {
     $("#viewer").close();
@@ -672,6 +760,7 @@ async function choose(skip = false) {
     await nextGroup();
     await load();
     await status();
+    refreshQuickReview(true);
   });
 }
 async function decide(decision) {
@@ -780,6 +869,16 @@ $("#navigation").onclick = (event) => {
   const button = event.target.closest("[data-view]");
   if (button) setView(button.dataset.view);
 };
+$(".quick-tabs").onclick = (event) => {
+  const button = event.target.closest("[data-view]");
+  if (button) setView(button.dataset.view);
+};
+$("#quick-review-open").onclick = () =>
+  action(async () => {
+    state.cullKind = "similar";
+    await nextGroup();
+  });
+$("#quick-duplicates-open").onclick = () => $("#duplicates-plan").click();
 for (const selector of ["#import", "#empty-import"])
   $(selector).onclick = () => $("#import-dialog").showModal();
 for (const selector of ["#help", "#help-top"])
@@ -814,6 +913,66 @@ $("#resume-scan").onclick = () =>
     state.running = true;
     await load();
   });
+async function loadScanErrors(reset = false) {
+    const list = $("#scan-errors-list");
+    const offset = reset ? 0 : list.children.length;
+    const data = await api(`/api/scan/errors?limit=500&offset=${offset}`);
+    state.scanErrorsRetryAllowed = Boolean(data.retry_allowed);
+    const errors = data.errors || [];
+    if (reset) list.replaceChildren();
+    list.append(...errors.map((entry) => {
+      const row = element("label", "scan-error-row");
+      const check = element("input");
+      check.type = "checkbox";
+      check.value = entry.path;
+      check.onchange = () => {
+        $("#scan-errors-retry").disabled = state.running || !state.scanErrorsRetryAllowed || !$("#scan-errors-list input:checked");
+      };
+      const body = element("span");
+      body.append(element("strong", "", entry.path), element("small", "", entry.error || "Неизвестная ошибка"));
+      row.append(check, body);
+      return row;
+    }));
+    const shown = list.children.length;
+    const summary = data.total
+      ? `${number(data.total)} файлов не удалось обработать. Показано ${number(shown)}. Выберите нужные и повторите после окончания сканирования.`
+      : "Ошибок отдельных файлов нет.";
+    const unlisted = data.unlisted_errors
+      ? ` Ещё ${number(data.unlisted_errors)} ошибок обхода папок или самого сканирования. Проверьте доступ к папке и запустите импорт снова.`
+      : "";
+    const paused = data.job && !data.retry_allowed
+      ? " Сначала завершите текущее сканирование, затем повторите выбранные файлы."
+      : "";
+    $("#scan-errors-summary").textContent = summary + unlisted + paused;
+    $("#scan-errors-more").hidden = shown >= data.total || !errors.length;
+    $("#scan-errors-select-all").disabled = !shown;
+    $("#scan-errors-retry").disabled = state.running || !state.scanErrorsRetryAllowed || !list.querySelector("input:checked");
+}
+$("#scan-errors-button").onclick = () =>
+  action(async () => {
+    await loadScanErrors(true);
+    $("#scan-errors-dialog").showModal();
+  });
+$("#scan-errors-more").onclick = () => action(() => loadScanErrors());
+$("#scan-errors-select-all").onclick = () => {
+  $("#scan-errors-list").querySelectorAll("input").forEach((input) => input.checked = true);
+  $("#scan-errors-retry").disabled = state.running || !state.scanErrorsRetryAllowed || !$("#scan-errors-list input:checked");
+};
+$("#scan-errors-retry").onclick = () =>
+  action(async () => {
+    const paths = [...$("#scan-errors-list").querySelectorAll("input:checked")].map((input) => input.value);
+    if (!paths.length) return;
+    if (JSON.stringify({ paths }).length > 3_500_000) {
+      toast("Слишком много файлов для одного повтора. Выберите меньшую группу.");
+      return;
+    }
+    await api("/api/scan/retry", { paths });
+    $("#scan-errors-dialog").close();
+    state.running = true;
+    await status();
+    await load();
+    toast(`Повторное сканирование ${number(paths.length)} файлов запущено`);
+  });
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
@@ -833,7 +992,9 @@ $("#root-filter").onchange = () => {
   state.offset = 0;
   state.selected.clear();
   $("#root-filter").title = $("#root-filter").value || "Показывать файлы из папки";
+  updateReviewScope();
   load();
+  refreshQuickReview(true);
   persist();
 };
 $("#density").onclick = () => {
@@ -986,31 +1147,129 @@ $("#export-form").onsubmit = (event) => {
     outcome(result, "Экспортировано");
   });
 };
+function duplicateGroups(plan) {
+  const groups = new Map();
+  const get = (hash) => {
+    if (!groups.has(hash)) groups.set(hash, { hash, keep: [], remove: [] });
+    return groups.get(hash);
+  };
+  for (const item of plan.keep || []) get(item.hash || `keep-${item.id}`).keep.push(item);
+  for (const item of plan.remove || []) get(item.hash || `copy-${item.id}`).remove.push(item);
+  return [...groups.values()];
+}
+function planFile(item, retained = false) {
+  const row = element("div", retained ? "plan-file plan-keep-row" : "plan-file");
+  if (retained) row.append(element("span", "", "✓"));
+  else {
+    const check = element("input");
+    check.type = "checkbox";
+    check.dataset.planId = item.id;
+    check.checked = state.duplicateSelected.has(item.id);
+    check.setAttribute("aria-label", `Переместить копию ${item.path} в корзину`);
+    check.onchange = () => {
+      if (check.checked) state.duplicateSelected.add(item.id);
+      else state.duplicateSelected.delete(item.id);
+      updateDuplicateSummary();
+    };
+    row.append(check);
+  }
+  const thumbnail = element("img");
+  thumbnail.src = `/media/${item.id}`;
+  thumbnail.alt = "";
+  thumbnail.loading = "lazy";
+  const body = element("div", "plan-file-body");
+  body.append(element("strong", "", retained ? `Сохранить · ${item.name}` : item.name));
+  const path = element("span", "", item.path);
+  path.title = item.path;
+  body.append(path);
+  row.append(thumbnail, body, element("span", "plan-file-size", retained ? "" : planSize(item.size)));
+  return row;
+}
+function updateDuplicateSummary() {
+  const plan = state.duplicatePlan;
+  if (!plan) return;
+  const selected = (plan.remove || []).filter((item) => state.duplicateSelected.has(item.id));
+  const bytes = selected.reduce((total, item) => total + Number(item.size || 0), 0);
+  const selectedText = selected.length
+    ? `Выбрано ${number(selected.length)} из ${number(plan.remove.length)} · ${planSize(bytes)}`
+    : `Ничего не выбрано · всего ${number(plan.remove.length)} кандидатов`;
+  $("#duplicates-summary").textContent =
+    `${selectedText}. Сохраняемых копий: ${number(plan.keep.length)}. Защищённых избранных: ${number(plan.protected_favorites)}.`;
+  $("#apply-duplicates").disabled = !selected.length;
+  $("#apply-duplicates").textContent = selected.length
+    ? `Проверить ${number(selected.length)} выбранных файлов`
+    : "Выберите файлы для проверки";
+}
+function renderDuplicatePlan() {
+  const plan = state.duplicatePlan;
+  const list = $("#duplicates-list");
+  const fragment = document.createDocumentFragment();
+  let visible = 0;
+  let groupNumber = 0;
+  for (const group of duplicateGroups(plan)) {
+    const available = Math.max(0, state.duplicateVisible - visible);
+    const candidates = group.remove.slice(0, available);
+    if (group.remove.length && !candidates.length) continue;
+    groupNumber++;
+    const section = element("section", "plan-group");
+    section.append(element("div", "plan-group-header", `Группа ${number(groupNumber)} · SHA-256 ${group.hash.slice(0, 16)} · ${number(group.remove.length)} кандидатов`));
+    for (const retained of group.keep) section.append(planFile(retained, true));
+    for (const candidate of candidates) section.append(planFile(candidate));
+    if (candidates.length < group.remove.length)
+      section.append(element("div", "plan-group-header", `Ещё ${number(group.remove.length - candidates.length)} копий не показаны и не выбраны`));
+    fragment.append(section);
+    visible += candidates.length;
+  }
+  list.replaceChildren(fragment);
+  $("#duplicates-visible-count").textContent = `Показано ${number(visible)} из ${number(plan.remove.length)} кандидатов`;
+  $("#more-duplicates").hidden = visible >= plan.remove.length;
+  updateDuplicateSummary();
+}
 $("#duplicates-plan").onclick = () =>
   action(async () => {
     const plan = await api("/api/duplicates/plan", {
       preferred_folder: state.settings.preferred_folder,
     });
     state.duplicatePlan = plan;
-    $("#duplicates-summary").textContent =
-      `Можно убрать ${plan.remove.length} копий (${size(plan.bytes)}). Сохраняется: ${plan.keep.length}. Защищённых избранных копий: ${plan.protected_favorites}.`;
-    $("#duplicates-list").replaceChildren(
-      ...plan.keep
-        .slice(0, 100)
-        .map((p) => element("p", "plan-keep", `✓ Сохранить: ${p.path}`)),
-      ...plan.remove
-        .slice(0, 100)
-        .map((p) => element("p", "plan-remove", `→ В корзину: ${p.path}`)),
-    );
-    $("#apply-duplicates").disabled = !plan.remove.length;
+    state.duplicateSelected.clear();
+    state.duplicateVisible = 200;
+    renderDuplicatePlan();
     $("#duplicates-dialog").showModal();
   });
-$("#apply-duplicates").onclick = () =>
+$("#more-duplicates").onclick = () => {
+  state.duplicateVisible += 200;
+  renderDuplicatePlan();
+};
+$("#select-visible-duplicates").onclick = () => {
+  $("#duplicates-list").querySelectorAll("input[data-plan-id]").forEach((check) => {
+    check.checked = true;
+    state.duplicateSelected.add(Number(check.dataset.planId));
+  });
+  updateDuplicateSummary();
+};
+$("#clear-duplicates").onclick = () => {
+  state.duplicateSelected.clear();
+  $("#duplicates-list").querySelectorAll("input[data-plan-id]").forEach((check) => check.checked = false);
+  updateDuplicateSummary();
+};
+$("#apply-duplicates").onclick = () => {
+  if (!state.duplicateSelected.size) return;
+  const selected = state.duplicatePlan.remove.filter((item) => state.duplicateSelected.has(item.id));
+  const bytes = selected.reduce((total, item) => total + Number(item.size || 0), 0);
+  $("#duplicates-confirm-summary").textContent =
+    `Будут перемещены ${number(selected.length)} ${fileWord(selected.length)} общим объёмом ${planSize(bytes)}. Проверьте выбор в полном плане; действие можно отменить или восстановить файлы из корзины.`;
+  $("#duplicates-confirm-dialog").showModal();
+};
+$("#duplicates-confirm-cancel").onclick = () => $("#duplicates-confirm-dialog").close();
+$("#duplicates-confirm-apply").onclick = () =>
   action(async () => {
-    const result = await api("/api/duplicates/apply", {
-      ids: state.duplicatePlan.remove.map((p) => p.id),
-    });
+    const ids = [...state.duplicateSelected];
+    if (!ids.length) return;
+    const result = await api("/api/duplicates/apply", { ids });
+    $("#duplicates-confirm-dialog").close();
     $("#duplicates-dialog").close();
+    state.duplicatePlan = null;
+    state.duplicateSelected.clear();
     await load();
     await status();
     outcome(result, "В корзине");

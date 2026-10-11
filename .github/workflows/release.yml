@@ -15,6 +15,12 @@ jobs:
       - name: Install Rust toolchain
         run: rustup update stable
       - uses: Swatinem/rust-cache@v2
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'))) {
+            choco install innosetup --no-progress -y
+          }
       - run: node --check photosort/web/app.js
       - run: .\packaging\build.ps1
         shell: pwsh
@@ -26,7 +32,7 @@ jobs:
             dist/*Setup*.exe
             dist/SHA256SUMS*.txt
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release PhotoSort 0.4.0')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -44,4 +50,4 @@ jobs:
         run: |
           RELEASE_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
           RELEASE_TAG="v${RELEASE_VERSION}"
-          gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "PhotoSort $RELEASE_TAG" --notes-file docs/RELEASE-0.4.md
+          gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "PhotoSort $RELEASE_TAG" --notes-file "docs/RELEASE-${RELEASE_VERSION%.*}.md"

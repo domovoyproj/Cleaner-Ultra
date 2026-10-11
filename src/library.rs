@@ -152,8 +152,44 @@ pub struct Library {
     version: AtomicU64,
     cache_writes: AtomicU64,
     cache_trim: Mutex<()>,
+    cache_usage: Mutex<CacheUsage>,
     video_preview: Mutex<()>,
     counts: Mutex<(u64, Value)>,
+}
+
+#[derive(Default)]
+struct CacheUsage {
+    bytes: u64,
+    sizes: HashMap<PathBuf, u64>,
+}
+
+fn owned_preview(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    name.strip_suffix(".jpg")
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        || name
+            .strip_prefix("video-")
+            .and_then(|s| s.strip_suffix(".webm"))
+            .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn cache_snapshot(thumbs: &Path) -> Result<CacheUsage> {
+    let mut usage = CacheUsage::default();
+    for entry in fs::read_dir(thumbs)? {
+        let entry = entry?;
+        if !owned_preview(&entry.path()) {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if meta.is_file() {
+            usage.bytes += meta.len();
+            usage.sizes.insert(entry.path(), meta.len());
+        }
+    }
+    Ok(usage)
 }
 
 impl Library {
@@ -163,6 +199,7 @@ impl Library {
         let thumbs = data.join("thumbnails");
         fs::create_dir_all(&thumbs)?;
         fs::create_dir_all(data.join("scratch"))?;
+        let cache_usage = cache_snapshot(&thumbs)?;
         let db = Connection::open(data.join("library.sqlite3"))?;
         db.busy_timeout(Duration::from_secs(30))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -171,7 +208,7 @@ impl Library {
           CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,root TEXT,generation TEXT,state TEXT,done INTEGER DEFAULT 0,total INTEGER DEFAULT 0,errors INTEGER DEFAULT 0,enumerated INTEGER DEFAULT 0);
           CREATE TABLE IF NOT EXISTS scan_queue(job INTEGER,path TEXT,state TEXT DEFAULT 'pending',error TEXT,PRIMARY KEY(job,path));
-          CREATE INDEX IF NOT EXISTS queue_pending ON scan_queue(job,state);
+          CREATE INDEX IF NOT EXISTS queue_pending_path ON scan_queue(job,state,path);
           CREATE TABLE IF NOT EXISTS actions(id INTEGER PRIMARY KEY,label TEXT,payload TEXT,state TEXT DEFAULT 'done');")?;
         let columns: HashSet<String> = db
             .prepare("PRAGMA table_info(photos)")?
@@ -191,6 +228,7 @@ impl Library {
             ("duration", "REAL NOT NULL DEFAULT 0"),
             ("fps", "REAL NOT NULL DEFAULT 0"),
             ("video_codec", "TEXT NOT NULL DEFAULT ''"),
+            ("search_name", "TEXT NOT NULL DEFAULT ''"),
         ] {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
@@ -198,7 +236,28 @@ impl Library {
                 ))?
             }
         }
-        db.execute_batch("CREATE INDEX IF NOT EXISTS photos_hash ON photos(hash);CREATE INDEX IF NOT EXISTS photos_similar ON photos(similar);CREATE INDEX IF NOT EXISTS photos_burst ON photos(burst);CREATE INDEX IF NOT EXISTS photos_active ON photos(trash,missing);CREATE INDEX IF NOT EXISTS photos_assets ON photos(asset_group);UPDATE jobs SET state='paused' WHERE state IN ('running','enumerating');")?;
+        let job_columns: HashSet<String> = db
+            .prepare("PRAGMA table_info(jobs)")?
+            .query_map([], |r| r.get(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !job_columns.contains("changed") {
+            db.execute_batch("ALTER TABLE jobs ADD COLUMN changed INTEGER NOT NULL DEFAULT 1")?;
+        }
+        db.execute_batch("DROP INDEX IF EXISTS queue_pending;CREATE INDEX IF NOT EXISTS queue_pending_path ON scan_queue(job,state,path);CREATE INDEX IF NOT EXISTS photos_hash ON photos(hash);CREATE INDEX IF NOT EXISTS photos_similar ON photos(similar);CREATE INDEX IF NOT EXISTS photos_burst ON photos(burst);CREATE INDEX IF NOT EXISTS photos_active ON photos(trash,missing);CREATE INDEX IF NOT EXISTS photos_assets ON photos(asset_group);UPDATE jobs SET state='paused' WHERE state IN ('running','enumerating');")?;
+        let unindexed_names: Vec<(i64, String)> = db
+            .prepare("SELECT id,name FROM photos WHERE search_name='' AND name!=''")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !unindexed_names.is_empty() {
+            let tx = db.unchecked_transaction()?;
+            for (id, name) in unindexed_names {
+                tx.execute(
+                    "UPDATE photos SET search_name=? WHERE id=?",
+                    params![name.to_lowercase(), id],
+                )?;
+            }
+            tx.commit()?;
+        }
         // Legacy paths gain an asset key while preserving ids, decisions and trash locations.
         let legacy: Vec<(i64, String)> = db
             .prepare("SELECT id,path FROM photos WHERE asset_group=''")?
@@ -225,10 +284,16 @@ impl Library {
             version: AtomicU64::new(1),
             cache_writes: AtomicU64::new(0),
             cache_trim: Mutex::new(()),
+            cache_usage: Mutex::new(cache_usage),
             video_preview: Mutex::new(()),
             counts: Mutex::new((0, json!({}))),
         });
         library.recover()?;
+        let cache_over_budget =
+            library.cache_usage.lock().bytes > library.settings().cache_mb * 1024 * 1024;
+        if cache_over_budget {
+            library.trim_cache()?;
+        }
         let resumable:Option<(i64,i64,i64,i64)>=library.db.lock().query_row("SELECT id,done,total,errors FROM jobs WHERE state='paused' ORDER BY id DESC LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).ok();
         if let Some((id, done, total, errors)) = resumable {
             *library.progress.lock() = Progress {
@@ -345,16 +410,27 @@ impl Library {
             }
             let db = self.db.lock();
             db.execute(
-                "INSERT INTO jobs(root,generation,state) VALUES(?,?,'enumerating')",
+                "INSERT INTO jobs(root,generation,state,changed) VALUES(?,?,'enumerating',0)",
                 params![path.to_string_lossy(), uuid::Uuid::new_v4().to_string()],
             )?;
             (db.last_insert_rowid(), path.to_string_lossy().to_string())
         };
+        self.spawn_scan(job, root)
+    }
+    fn spawn_scan(self: &Arc<Self>, job: i64, root: String) -> Result<()> {
+        let (done, total, errors): (i64, i64, i64) = self.db.lock().query_row(
+            "SELECT done,total,errors FROM jobs WHERE id=?",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
         self.pause.store(false, Ordering::Relaxed);
         self.shutdown.store(false, Ordering::Relaxed);
         *self.progress.lock() = Progress {
             running: true,
             job: Some(job),
+            done,
+            total,
+            errors,
             message: "Поиск файлов…".into(),
             ..Progress::default()
         };
@@ -502,47 +578,91 @@ impl Library {
                     })
                     .collect()
             });
+            let mut done_delta = 0;
+            let mut error_delta = 0;
+            let mut changed = false;
+            let mut preview_hashes = HashSet::new();
+            let mut last_path = String::new();
+            let mut last_error = None;
+            let mut db = self.db.lock();
+            let tx = db.transaction()?;
             for (path, result) in results {
-                if let Some(result) = result {
-                    match result {
-                        Ok(description) => {
-                            let db = self.db.lock();
-                            if let Some((hash, size, mtime, d)) = description {
-                                db.execute("INSERT INTO photos(path,root,name,size,mtime,width,height,captured,hash,dhash,sharpness,seen,ahash,crop_hash,brightness,quality_hint,asset_group,media_kind,duration,fps,video_codec) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET root=excluded.root,name=excluded.name,size=excluded.size,mtime=excluded.mtime,width=excluded.width,height=excluded.height,captured=excluded.captured,hash=excluded.hash,dhash=excluded.dhash,sharpness=excluded.sharpness,seen=excluded.seen,ahash=excluded.ahash,crop_hash=excluded.crop_hash,brightness=excluded.brightness,quality_hint=excluded.quality_hint,asset_group=excluded.asset_group,media_kind=excluded.media_kind,duration=excluded.duration,fps=excluded.fps,video_codec=excluded.video_codec,missing=0,faces=NULL,eye_score=NULL",params![path,root.to_string_lossy(),Path::new(path).file_name().unwrap_or_default().to_string_lossy(),size,mtime,d.width,d.height,d.captured,hash,d.dhash,d.sharpness,generation,d.ahash,d.crop_hash,d.brightness,d.quality_hint,asset_key(Path::new(path)),d.media_kind,d.duration,d.fps,d.video_codec])?;
-                            } else {
-                                db.execute("UPDATE photos SET seen=?,missing=0 WHERE path=? AND trash IS NULL",params![generation,path])?;
-                            }
-                            db.execute(
-                                "UPDATE scan_queue SET state='done' WHERE job=? AND path=?",
-                                params![job, path],
+                let Some(result) = result else { continue };
+                last_path = Path::new(path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                match result {
+                    Ok(description) => {
+                        if let Some((hash, size, mtime, d)) = description {
+                            preview_hashes.insert(hash.clone());
+                            let name = Path::new(path)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            tx.execute("INSERT INTO photos(path,root,name,search_name,size,mtime,width,height,captured,hash,dhash,sharpness,seen,ahash,crop_hash,brightness,quality_hint,asset_group,media_kind,duration,fps,video_codec) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET root=excluded.root,name=excluded.name,search_name=excluded.search_name,size=excluded.size,mtime=excluded.mtime,width=excluded.width,height=excluded.height,captured=excluded.captured,hash=excluded.hash,dhash=excluded.dhash,sharpness=excluded.sharpness,seen=excluded.seen,ahash=excluded.ahash,crop_hash=excluded.crop_hash,brightness=excluded.brightness,quality_hint=excluded.quality_hint,asset_group=excluded.asset_group,media_kind=excluded.media_kind,duration=excluded.duration,fps=excluded.fps,video_codec=excluded.video_codec,missing=0,faces=NULL,eye_score=NULL",params![path,root.to_string_lossy(),name,name.to_lowercase(),size,mtime,d.width,d.height,d.captured,hash,d.dhash,d.sharpness,generation,d.ahash,d.crop_hash,d.brightness,d.quality_hint,asset_key(Path::new(path)),d.media_kind,d.duration,d.fps,d.video_codec])?;
+                            changed = true;
+                        } else {
+                            let restored = tx.execute(
+                                "UPDATE photos SET seen=?,missing=0 WHERE path=? AND trash IS NULL AND missing=1",
+                                params![generation, path],
                             )?;
-                            db.execute("UPDATE jobs SET done=done+1 WHERE id=?", [job])?;
+                            if restored > 0 {
+                                changed = true;
+                            } else {
+                                tx.execute(
+                                    "UPDATE photos SET seen=? WHERE path=? AND trash IS NULL",
+                                    params![generation, path],
+                                )?;
+                            }
                         }
-                        Err(error) => {
-                            self.db.lock().execute("UPDATE scan_queue SET state='error',error=? WHERE job=? AND path=?",params![error.to_string(),job,path])?;
-                            self.error(job, &error.to_string())?;
+                        if tx.execute("UPDATE scan_queue SET state='done',error=NULL WHERE job=? AND path=? AND state='pending'", params![job,path])? != 1 {
+                            bail!("Очередь сканирования изменилась")
                         }
+                        done_delta += 1;
                     }
-                    let (done, total, errors): (i64, i64, i64) = self.db.lock().query_row(
-                        "SELECT done,total,errors FROM jobs WHERE id=?",
-                        [job],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )?;
-                    let mut p = self.progress.lock();
-                    p.done = done;
-                    p.total = total;
-                    p.errors = errors;
-                    p.message = Path::new(path)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
+                    Err(error) => {
+                        let message = error.to_string();
+                        if tx.execute("UPDATE scan_queue SET state='error',error=? WHERE job=? AND path=? AND state='pending'",params![message,job,path])? != 1 {
+                            bail!("Очередь сканирования изменилась")
+                        }
+                        last_error = Some(message);
+                        error_delta += 1;
+                    }
                 }
             }
-            self.touch();
-            let processed = self.progress.lock().done;
-            if processed > 0 && processed % 256 == 0 {
-                self.trim_cache()?;
+            tx.execute(
+                "UPDATE jobs SET done=done+?,errors=errors+?,changed=MAX(changed,?) WHERE id=?",
+                params![done_delta, error_delta, i64::from(changed), job],
+            )?;
+            tx.commit()?;
+            let (done, total, errors): (i64, i64, i64) = db.query_row(
+                "SELECT done,total,errors FROM jobs WHERE id=?",
+                [job],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            drop(db);
+            if !preview_hashes.is_empty() {
+                let mut bytes = 0;
+                for hash in preview_hashes {
+                    bytes = self.track_preview(&hash)?;
+                }
+                if bytes > self.settings().cache_mb * 1024 * 1024 {
+                    self.trim_cache()?;
+                }
+            }
+            let mut p = self.progress.lock();
+            p.done = done;
+            p.total = total;
+            p.errors = errors;
+            p.message = last_path;
+            if let Some(error) = last_error {
+                p.last_error = error;
+            }
+            drop(p);
+            if changed {
+                self.touch();
             }
         }
         if self.stopped() {
@@ -556,31 +676,49 @@ impl Library {
         if errors == 0 {
             let rows: Vec<(i64, String)> = {
                 let db = self.db.lock();
-                let mut statement =
-                    db.prepare("SELECT id,path FROM photos WHERE trash IS NULL AND seen != ?")?;
+                let mut statement = db.prepare(
+                    "SELECT id,path FROM photos WHERE trash IS NULL AND missing=0 AND seen != ?",
+                )?;
                 statement
                     .query_map([&generation], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?
             };
-            let db = self.db.lock();
+            let mut db = self.db.lock();
+            let tx = db.transaction()?;
+            let mut missing_changed = false;
             for (id, path) in rows {
                 if Path::new(&path).starts_with(root) {
-                    db.execute("UPDATE photos SET missing=1 WHERE id=?", [id])?;
+                    tx.execute("UPDATE photos SET missing=1 WHERE id=?", [id])?;
+                    missing_changed = true;
                 }
             }
-        }
-        if let Err(error) = self.group() {
-            if self.stopped() {
-                return self.pause_job(job);
+            if missing_changed {
+                tx.execute("UPDATE jobs SET changed=1 WHERE id=?", [job])?;
             }
-            return Err(error);
+            tx.commit()?;
+        }
+        let changed: bool =
+            self.db
+                .lock()
+                .query_row("SELECT changed FROM jobs WHERE id=?", [job], |r| r.get(0))?;
+        if changed {
+            if let Err(error) = self.group() {
+                if self.stopped() {
+                    return self.pause_job(job);
+                }
+                return Err(error);
+            }
         }
         if self.stopped() {
             return self.pause_job(job);
         }
-        self.db
-            .lock()
-            .execute("UPDATE jobs SET state='complete' WHERE id=?", [job])?;
+        {
+            let mut db = self.db.lock();
+            let tx = db.transaction()?;
+            tx.execute("UPDATE jobs SET state='complete' WHERE id=?", [job])?;
+            tx.execute("DELETE FROM scan_queue WHERE job=? AND state='done'", [job])?;
+            tx.commit()?;
+        }
         {
             let mut p = self.progress.lock();
             p.running = false;
@@ -623,6 +761,75 @@ impl Library {
             .execute("UPDATE jobs SET errors=errors+1 WHERE id=?", [job])?;
         self.progress.lock().last_error = error.into();
         Ok(())
+    }
+    pub fn scan_errors(&self, limit: i64, offset: i64) -> Result<Value> {
+        let db = self.db.lock();
+        let (job, job_state, job_errors): (i64, String, i64) = db
+            .query_row(
+                "SELECT id,state,errors FROM jobs ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap_or((0, String::new(), 0));
+        let total: i64 = db.query_row(
+            "SELECT COUNT(*) FROM scan_queue WHERE job=? AND state='error'",
+            [job],
+            |r| r.get(0),
+        )?;
+        let mut statement = db.prepare(
+            "SELECT path,error FROM scan_queue WHERE job=? AND state='error' ORDER BY path LIMIT ? OFFSET ?",
+        )?;
+        let errors = statement
+            .query_map(params![job, limit.clamp(1, 1000), offset.max(0)], |r| {
+                Ok(json!({"path":r.get::<_, String>(0)?,"error":r.get::<_, Option<String>>(1)?}))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(
+            json!({"job":job,"total":total,"offset":offset.max(0),"errors":errors,"unlisted_errors":(job_errors-total).max(0),"retry_allowed":job_state=="complete"}),
+        )
+    }
+    pub fn retry_scan_errors(self: &Arc<Self>, paths: &[String]) -> Result<Value> {
+        if paths.is_empty() {
+            bail!("Выберите файлы для повтора")
+        }
+        let _guard = self.mutation.lock();
+        if self.progress.lock().running {
+            bail!("Сканирование уже выполняется")
+        }
+        if let Some(handle) = self.worker.lock().take() {
+            let _ = handle.join();
+        }
+        let _video = self.video_preview.lock();
+        let mut db = self.db.lock();
+        let (job, root, state): (i64, String, String) = db
+            .query_row(
+                "SELECT id,root,state FROM jobs ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .context("Нет ошибок импорта для повтора")?;
+        if state != "complete" {
+            bail!("Сначала завершите или продолжите текущее сканирование")
+        }
+        let tx = db.transaction()?;
+        let mut queued = 0;
+        for path in paths {
+            queued += tx.execute(
+                "UPDATE scan_queue SET state='pending',error=NULL WHERE job=? AND path=? AND state='error'",
+                params![job, path],
+            )?;
+        }
+        if queued == 0 {
+            bail!("Выбранные файлы уже обработаны")
+        }
+        tx.execute(
+            "UPDATE jobs SET state='paused',errors=errors-? WHERE id=?",
+            params![queued, job],
+        )?;
+        tx.commit()?;
+        drop(db);
+        self.spawn_scan(job, root)?;
+        Ok(json!({"queued":queued,"job":job}))
     }
     pub fn group(&self) -> Result<()> {
         let sensitivity = self.settings().sensitivity;
@@ -817,7 +1024,8 @@ impl Library {
                 " AND {field} IN(SELECT {field} FROM photos WHERE {ACTIVE} GROUP BY {field} HAVING COUNT(*)>1)"
             )
         }
-        condition += " AND instr(lower(name),lower(?))>0 AND (?='' OR root=?)";
+        condition += " AND instr(search_name,?)>0 AND (?='' OR root=?)";
+        let folded_search = search.to_lowercase();
         let order = match sort {
             "name" => "name COLLATE NOCASE",
             "quality" => "sharpness DESC",
@@ -831,10 +1039,10 @@ impl Library {
         };
         let total: i64 = self.db.lock().query_row(
             &format!("SELECT COUNT(*) FROM photos WHERE {condition}"),
-            params![search, root, root],
+            params![&folded_search, root, root],
             |r| r.get(0),
         )?;
-        let photos=self.photos_sql(&format!("SELECT {COLUMNS} FROM photos WHERE {condition} ORDER BY {order},id LIMIT 80 OFFSET ?"),&[&search,&root,&root,&offset.max(0)])?;
+        let photos=self.photos_sql(&format!("SELECT {COLUMNS} FROM photos WHERE {condition} ORDER BY {order},id LIMIT 80 OFFSET ?"),&[&folded_search,&root,&root,&offset.max(0)])?;
         Ok(
             json!({"photos":photos,"total":total,"counts":self.counts()?,"progress":self.progress.lock().clone()}),
         )
@@ -889,6 +1097,14 @@ impl Library {
         Ok(json!({"ok":true,"action":action}))
     }
     fn transfer(&self, photo: &Photo, restore: bool) -> Result<()> {
+        let pending: i64 = self.db.lock().query_row(
+            "SELECT COUNT(*) FROM operations WHERE photo=? AND state='pending'",
+            [photo.id],
+            |r| r.get(0),
+        )?;
+        if pending != 0 {
+            bail!("Для файла есть незавершённый перенос. Требуется разрешить конфликт")
+        }
         let root = fs::canonicalize(&photo.root).context("Исходная папка недоступна")?;
         let original = PathBuf::from(&photo.path);
         let trash_dir = root.join(".photosort-trash");
@@ -946,13 +1162,9 @@ impl Library {
             )?;
             db.last_insert_rowid()
         };
-        if let Err(error) = safe_transfer(&source, &target, &photo.hash) {
-            let _ = self
-                .db
-                .lock()
-                .execute("UPDATE operations SET state='cancelled' WHERE id=?", [op]);
-            return Err(error);
-        }
+        // Keep the journal pending on failure. The destination may contain the
+        // only verified copy if the source changed after it was copied.
+        safe_transfer(&source, &target, &photo.hash)?;
         let trash = if restore {
             None
         } else {
@@ -971,6 +1183,7 @@ impl Library {
     pub fn move_photos(&self, ids: &[i64], restore: bool) -> Result<Outcome> {
         let _guard = self.mutation.lock();
         self.ensure_idle()?;
+        self.recover()?;
         let photos = self.expand(ids)?;
         let mut outcome = Outcome::default();
         let mut snapshots = Vec::new();
@@ -1072,56 +1285,112 @@ impl Library {
                 .collect::<rusqlite::Result<_>>()?
         };
         for (id, photo, source, destination, kind) in ops {
+            let Ok(photo_record) = self.photo(photo) else {
+                continue;
+            };
             let source = Path::new(&source);
             let target = Path::new(&destination);
-            if !source.exists() && target.exists() {
-                if analysis::fingerprint(target)? != self.photo(photo)?.hash {
-                    continue;
+            let expected_trash = Path::new(&photo_record.root).join(".photosort-trash");
+            let source_path = normal_path(source);
+            let target_path = normal_path(target);
+            let paths_valid = match kind.as_str() {
+                "trash" => {
+                    source_path == normal_path(Path::new(&photo_record.path))
+                        && target_path.parent() == Some(expected_trash.as_path())
+                        && photo_record.trash.is_none()
                 }
+                "restore" => {
+                    target_path == normal_path(Path::new(&photo_record.path))
+                        && photo_record
+                            .trash
+                            .as_deref()
+                            .map(|path| normal_path(Path::new(path)))
+                            == Some(source_path.clone())
+                        && source_path.parent() == Some(expected_trash.as_path())
+                }
+                _ => false,
+            };
+            if !paths_valid
+                || source.is_symlink()
+                || target.is_symlink()
+                || expected_trash.is_symlink()
+            {
+                continue;
+            }
+            let root = Path::new(&photo_record.root);
+            let original_parent = Path::new(&photo_record.path).parent();
+            let parents_safe = canonical_path(root).ok().as_deref() == Some(root)
+                && canonical_path(&expected_trash).ok().as_deref()
+                    == Some(expected_trash.as_path())
+                && original_parent
+                    .and_then(|parent| canonical_path(parent).ok())
+                    .is_some_and(|parent| parent.starts_with(root));
+            if !parents_safe {
+                continue;
+            }
+            let source_exists = source.exists();
+            let target_exists = target.exists();
+            let source_valid = source_exists
+                && analysis::fingerprint(source).ok().as_deref()
+                    == Some(photo_record.hash.as_str());
+            let target_valid = target_exists
+                && analysis::fingerprint(target).ok().as_deref()
+                    == Some(photo_record.hash.as_str());
+            if !source_exists && target_valid {
                 let trash = if kind == "trash" {
                     Some(target.to_string_lossy().to_string())
                 } else {
                     None
                 };
-                let db = self.db.lock();
-                db.execute(
+                let mut db = self.db.lock();
+                let tx = db.transaction()?;
+                tx.execute(
                     "UPDATE photos SET trash=?,missing=0 WHERE id=?",
                     params![trash, photo],
                 )?;
-                db.execute("UPDATE operations SET state='done' WHERE id=?", [id])?;
-            } else if source.exists() {
-                if target.exists() {
-                    let same = same_file::is_same_file(source, target).unwrap_or(false);
-                    if !same
-                        && analysis::fingerprint(target).ok().as_deref()
-                            != Some(self.photo(photo)?.hash.as_str())
-                    {
-                        continue;
-                    }
-                    fs::remove_file(target)?;
-                }
+                tx.execute("UPDATE operations SET state='done' WHERE id=?", [id])?;
+                tx.commit()?;
+            } else if source_valid && !target_exists {
                 self.db
                     .lock()
                     .execute("UPDATE operations SET state='cancelled' WHERE id=?", [id])?;
+            } else if source_valid && target_valid {
+                // A verified source survives. The target is just a duplicate,
+                // whether the transfer used a hard link or a copy fallback.
+                if analysis::fingerprint(source).ok().as_deref() != Some(photo_record.hash.as_str())
+                {
+                    continue;
+                }
+                if fs::remove_file(target).is_ok() {
+                    self.db
+                        .lock()
+                        .execute("UPDATE operations SET state='cancelled' WHERE id=?", [id])?;
+                }
             }
+            // All other combinations are ambiguous. Preserve both files and
+            // leave this journal entry pending for a later recovery attempt.
         }
         Ok(())
     }
     pub fn next_group(&self, kind: &str) -> Result<Value> {
+        self.next_group_filtered(kind, "")
+    }
+    pub fn next_group_filtered(&self, kind: &str, root: &str) -> Result<Value> {
         let field = match kind {
             "bursts" => "burst",
             "duplicates" => "hash",
             _ => "similar",
         };
+        let scope = format!("{ACTIVE} AND (?='' OR root=?)");
         let (key, total, remaining): (Option<String>, i64, i64) = {
             let db = self.db.lock();
-            let key=db.query_row(&format!("SELECT CAST({field} AS TEXT) FROM photos WHERE {ACTIVE} GROUP BY {field} HAVING COUNT(DISTINCT asset_group)>1 AND SUM(reviewed)<COUNT(*) ORDER BY MIN(id) LIMIT 1"),[],|r|r.get(0)).ok();
-            let total=db.query_row(&format!("SELECT COUNT(*) FROM(SELECT {field} FROM photos WHERE {ACTIVE} GROUP BY {field} HAVING COUNT(DISTINCT asset_group)>1)"),[],|r|r.get(0))?;
-            let remaining=db.query_row(&format!("SELECT COUNT(*) FROM(SELECT {field} FROM photos WHERE {ACTIVE} GROUP BY {field} HAVING COUNT(DISTINCT asset_group)>1 AND SUM(reviewed)<COUNT(*))"),[],|r|r.get(0))?;
+            let key=db.query_row(&format!("SELECT CAST({field} AS TEXT) FROM photos WHERE {scope} GROUP BY {field} HAVING COUNT(DISTINCT asset_group)>1 AND SUM(reviewed)<COUNT(*) ORDER BY MIN(id) LIMIT 1"),params![root,root],|r|r.get(0)).ok();
+            let total=db.query_row(&format!("SELECT COUNT(*) FROM(SELECT {field} FROM photos WHERE {scope} GROUP BY {field} HAVING COUNT(DISTINCT asset_group)>1)"),params![root,root],|r|r.get(0))?;
+            let remaining=db.query_row(&format!("SELECT COUNT(*) FROM(SELECT {field} FROM photos WHERE {scope} GROUP BY {field} HAVING COUNT(DISTINCT asset_group)>1 AND SUM(reviewed)<COUNT(*))"),params![root,root],|r|r.get(0))?;
             (key, total, remaining)
         };
         let photos = if let Some(key) = &key {
-            self.photos_sql(&format!("SELECT {COLUMNS} FROM photos WHERE {ACTIVE} AND reviewed=0 AND CAST({field} AS TEXT)=? ORDER BY favorite DESC,sharpness DESC,id LIMIT 200"),&[key])?
+            self.photos_sql(&format!("SELECT {COLUMNS} FROM photos WHERE {scope} AND reviewed=0 AND CAST({field} AS TEXT)=? ORDER BY favorite DESC,sharpness DESC,id"),&[&root,&root,key])?
         } else {
             vec![]
         };
@@ -1170,11 +1439,14 @@ impl Library {
         for photo in photos {
             groups.entry(photo.hash.clone()).or_default().push(photo)
         }
+        let mut hashes: Vec<_> = groups.keys().cloned().collect();
+        hashes.sort();
         let mut remove = Vec::new();
         let mut keep = Vec::new();
         let mut bytes = 0;
         let mut warnings = 0;
-        for mut group in groups.into_values() {
+        for hash in hashes {
+            let mut group = groups.remove(&hash).unwrap_or_default();
             group.sort_by_key(|p| {
                 (
                     !p.favorite,
@@ -1184,14 +1456,15 @@ impl Library {
                 )
             });
             let retained = group.remove(0);
-            keep.push(json!({"id":retained.id,"name":retained.name,"path":retained.path}));
+            keep.push(json!({"id":retained.id,"name":retained.name,"path":retained.path,"hash":retained.hash,"size":retained.size,"protected":retained.favorite}));
             for p in group {
                 if p.favorite {
                     warnings += 1;
+                    keep.push(json!({"id":p.id,"name":p.name,"path":p.path,"hash":p.hash,"size":p.size,"protected":true}));
                     continue;
                 }
                 bytes += p.size;
-                remove.push(json!({"id":p.id,"name":p.name,"path":p.path}));
+                remove.push(json!({"id":p.id,"name":p.name,"path":p.path,"hash":p.hash,"size":p.size,"protected":false}));
             }
         }
         Ok(json!({"keep":keep,"remove":remove,"bytes":bytes,"protected_favorites":warnings}))
@@ -1200,7 +1473,12 @@ impl Library {
         // Revalidate the preview against current files and keep at least one active copy of every hash.
         let _guard = self.mutation.lock();
         self.ensure_idle()?;
-        let photos = self.expand(ids)?;
+        let mut unique = HashSet::new();
+        let photos = ids
+            .iter()
+            .filter(|id| unique.insert(**id))
+            .map(|id| self.photo(*id))
+            .collect::<Result<Vec<_>>>()?;
         let selected: HashSet<_> = photos.iter().map(|p| p.id).collect();
         let mut outcome = Outcome::default();
         let mut snapshots = Vec::new();
@@ -1293,7 +1571,7 @@ impl Library {
                         analysis::extension(source)
                     ));
                 }
-                copy_exclusive(source, &target, &p.hash)?;
+                copy_verified_atomic(source, &target, &p.hash)?;
                 Ok(())
             })();
             match result {
@@ -1337,8 +1615,13 @@ impl Library {
             }
         }
         let bytes = fs::read(path)?;
-        if generated && self.cache_writes.fetch_add(1, Ordering::Relaxed) % 64 == 63 {
-            self.trim_cache()?;
+        if generated {
+            let occupied = self.track_preview(&photo.hash)?;
+            if occupied > self.settings().cache_mb * 1024 * 1024
+                || self.cache_writes.fetch_add(1, Ordering::Relaxed) % 64 == 63
+            {
+                self.trim_cache()?;
+            }
         }
         Ok(bytes)
     }
@@ -1389,6 +1672,22 @@ impl Library {
         self.trim_cache_except(Some(&target))?;
         Ok(target)
     }
+    fn track_preview(&self, hash: &str) -> Result<u64> {
+        let _guard = self.cache_trim.lock();
+        let path = self.thumbs.join(format!("{hash}.jpg"));
+        let size = fs::metadata(&path)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len());
+        let mut usage = self.cache_usage.lock();
+        let previous = usage.sizes.remove(&path).unwrap_or(0);
+        usage.bytes = usage.bytes.saturating_sub(previous);
+        if let Some(size) = size {
+            usage.sizes.insert(path, size);
+            usage.bytes = usage.bytes.saturating_add(size);
+        }
+        Ok(usage.bytes)
+    }
     pub fn trim_cache(&self) -> Result<Value> {
         self.trim_cache_except(None)
     }
@@ -1397,22 +1696,16 @@ impl Library {
         let budget = self.settings().cache_mb * 1024 * 1024;
         let mut files = Vec::new();
         let mut bytes = 0;
+        let mut sizes = HashMap::new();
         for entry in fs::read_dir(&self.thumbs)? {
             let entry = entry?;
-            let owned_video = entry.file_name().to_str().is_some_and(|name| {
-                name.strip_prefix("video-")
-                    .and_then(|s| s.strip_suffix(".webm"))
-                    .is_some_and(|hash| {
-                        hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
-                    })
-            });
-            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("jpg") && !owned_video
-            {
+            if !owned_preview(&entry.path()) {
                 continue;
             }
             let meta = entry.metadata()?;
             if meta.is_file() {
                 bytes += meta.len();
+                sizes.insert(entry.path(), meta.len());
                 files.push((
                     meta.modified().unwrap_or(UNIX_EPOCH),
                     meta.len(),
@@ -1436,8 +1729,10 @@ impl Library {
                 return Err(error.into());
             }
             bytes = bytes.saturating_sub(size);
+            sizes.remove(&path);
             removed += 1
         }
+        *self.cache_usage.lock() = CacheUsage { bytes, sizes };
         Ok(json!({"bytes":bytes,"limit":budget,"removed":removed}))
     }
     pub fn status(&self) -> Result<Value> {
@@ -1456,25 +1751,33 @@ impl Library {
                 |r| r.get::<_, String>(0),
             )
             .ok();
+        let pending_operations: i64 = self.db.lock().query_row(
+            "SELECT COUNT(*) FROM operations WHERE state='pending'",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(
-            json!({"version":env!("CARGO_PKG_VERSION"),"engine":"Rust","settings":self.settings(),"roots":roots,"undo":undo,"progress":self.progress.lock().clone(),"codecs":analysis::decoder_path().is_some(),"video_codecs":crate::video::tool("ffmpeg").is_some() && crate::video::tool("ffprobe").is_some()}),
+            json!({"version":env!("CARGO_PKG_VERSION"),"engine":"Rust","settings":self.settings(),"roots":roots,"undo":undo,"pending_operations":pending_operations,"progress":self.progress.lock().clone(),"codecs":analysis::decoder_path().is_some(),"video_codecs":crate::video::tool("ffmpeg").is_some() && crate::video::tool("ffprobe").is_some()}),
         )
     }
 }
 fn canonical_path(path: &Path) -> Result<PathBuf> {
     let resolved = fs::canonicalize(path)?;
+    Ok(normal_path(&resolved))
+}
+fn normal_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         // Match pathlib's 0.1 database paths, including ordinary and network drives.
-        let value = resolved.to_string_lossy();
+        let value = path.to_string_lossy();
         if let Some(network) = value.strip_prefix(r"\\?\UNC\") {
-            return Ok(PathBuf::from(format!(r"\\{network}")));
+            return PathBuf::from(format!(r"\\{network}"));
         }
         if let Some(local) = value.strip_prefix(r"\\?\") {
-            return Ok(PathBuf::from(local));
+            return PathBuf::from(local);
         }
     }
-    Ok(resolved)
+    path.to_path_buf()
 }
 pub fn asset_key(path: &Path) -> String {
     if crate::video::is_video(path) {
@@ -1529,6 +1832,56 @@ pub fn copy_exclusive(source: &Path, target: &Path, expected: &str) -> Result<()
     }
     result
 }
+fn copy_verified_atomic(source: &Path, target: &Path, expected: &str) -> Result<()> {
+    let parent = target.parent().context("Некорректный путь экспорта")?;
+    let temporary = parent.join(format!(".photosort-export-{}.part", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        copy_exclusive(source, &temporary, expected)?;
+        publish_verified(&temporary, target)
+            .context("Не удалось атомарно опубликовать экспорт без замены файла")?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
+}
+#[cfg(windows)]
+fn publish_verified(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "MoveFileW"]
+        fn move_file(source: *const u16, destination: *const u16) -> i32;
+    }
+    if temporary.parent() != target.parent() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Временный и конечный файл должны быть в одной папке",
+        ));
+    }
+    // MoveFileW requires the destination name to be absent. With both paths in
+    // the same directory this is a no-replace rename, including on FAT/exFAT.
+    let source: Vec<u16> = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if unsafe { move_file(source.as_ptr(), destination.as_ptr()) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+#[cfg(not(windows))]
+fn publish_verified(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    // Linking is an exclusive, same-directory publication on Unix platforms.
+    fs::hard_link(temporary, target)
+}
 pub fn safe_transfer(source: &Path, target: &Path, expected: &str) -> Result<()> {
     if target.exists() {
         bail!("Путь уже занят")
@@ -1536,20 +1889,11 @@ pub fn safe_transfer(source: &Path, target: &Path, expected: &str) -> Result<()>
     if fs::hard_link(source, target).is_err() {
         copy_exclusive(source, target, expected)?;
     }
-    match analysis::fingerprint(source) {
-        Ok(hash) if hash == expected => {}
-        Ok(_) => {
-            let _ = fs::remove_file(target);
-            bail!("Файл изменился во время перемещения")
-        }
-        Err(error) => {
-            let _ = fs::remove_file(target);
-            return Err(error);
-        }
+    if analysis::fingerprint(source)? != expected {
+        bail!("Файл изменился во время перемещения")
     }
-    if let Err(error) = fs::remove_file(source) {
-        let _ = fs::remove_file(target);
-        return Err(error.into());
-    }
+    // If unlinking the source fails, leave the verified target and pending
+    // journal entry intact. Recovery can decide safely after checking both.
+    fs::remove_file(source)?;
     Ok(())
 }

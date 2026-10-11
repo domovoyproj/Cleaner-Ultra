@@ -259,8 +259,17 @@ fn route(library: &Arc<Library>, token: &str, request: &mut Request) -> Result<(
                 &get("root", ""),
             )?,
             "/api/progress" => serde_json::to_value(library.progress.lock().clone())?,
+            "/api/scan/errors" => library.scan_errors(
+                get("limit", "500")
+                    .parse::<i64>()
+                    .unwrap_or(500)
+                    .clamp(1, 1000),
+                get("offset", "0").parse::<i64>().unwrap_or(0).max(0),
+            )?,
             "/api/status" => library.status()?,
-            "/api/group" => library.next_group(&get("kind", "similar"))?,
+            "/api/group" => {
+                library.next_group_filtered(&get("kind", "similar"), &get("root", ""))?
+            }
             "/" => {
                 return Ok((
                     include_bytes!("../photosort/web/index.html").to_vec(),
@@ -356,6 +365,25 @@ fn route(library: &Arc<Library>, token: &str, request: &mut Request) -> Result<(
             "/api/stop" | "/api/pause" => {
                 library.pause();
                 json!({"ok":true})
+            }
+            "/api/scan/retry" => {
+                let paths = body
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .context_or("Некорректный список файлов")?;
+                if paths.len() > 10000 {
+                    bail!("Слишком много файлов")
+                }
+                let paths: Vec<String> = paths
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .context_or("Некорректный путь")
+                    })
+                    .collect::<Result<_>>()?;
+                library.retry_scan_errors(&paths)?
             }
             "/api/pick" => {
                 let folder = rfd::FileDialog::new()

@@ -40,10 +40,8 @@
           <span aria-hidden="true">↗</span>
         </button>
       </div>
-      <a class="brand" href="/"
-        ><span class="brand-icon">◈</span>PhotoSort<span class="version"
-          >04</span
-        ></a
+      <a class="brand" href="/" aria-label="PhotoSort — библиотека"
+        ><span class="brand-icon" aria-hidden="true">◈</span><span class="brand-name">PhotoSort</span><span class="version">05</span></a
       >
       <div class="workspace">
         <span class="workspace-icon">▧</span>
@@ -106,23 +104,13 @@
     </aside>
     <main>
       <header class="topbar">
-        <div class="breadcrumb">
-          Библиотека <span>/</span> <strong id="crumb">Все файлы</strong>
-        </div>
-        <div class="top-actions">
-          <span class="local-status"><i></i> Rust · Локально</span
-          ><button
-            class="icon-button"
-            id="undo"
-            aria-label="Отменить действие"
-            title="Ctrl+Z"
-          >
-            ↶</button
-          ><button class="icon-button" id="settings" aria-label="Настройки">
-            ⚙</button
-          ><button class="icon-button" id="help-top" aria-label="Справка">
-            ?
-          </button>
+        <div class="topbar-brand"><span class="topbar-brand-mark" aria-hidden="true">◈</span><strong>PhotoSort</strong></div>
+        <div class="topbar-actions">
+          <label class="search"><span aria-hidden="true">⌕</span><input id="search" placeholder="Поиск по имени файла…" aria-label="Поиск по имени" /><kbd>/</kbd></label>
+          <button class="button primary" id="import"><span>＋</span> Добавить папку</button>
+          <button class="icon-button" id="undo" aria-label="Отменить действие" title="Ctrl+Z">↶</button>
+          <button class="icon-button" id="settings" aria-label="Настройки">⚙</button>
+          <button class="icon-button" id="help-top" aria-label="Справка">?</button>
         </div>
       </header>
       <section class="content">
@@ -134,9 +122,22 @@
               Освободите место для того, что хочется сохранить.
             </p>
           </div>
-          <button class="button primary" id="import">
-            <span>＋</span> Добавить папку
-          </button>
+          <div class="heading-status"><span class="local-status"><i></i> Локально · Rust</span><strong id="crumb">Все файлы</strong></div>
+        </div>
+        <div id="pending-operations" class="pending-operations" role="status" hidden></div>
+        <div class="quick-tabs" role="group" aria-label="Типы файлов">
+          <button type="button" data-view="all" class="active">Все</button>
+          <button type="button" data-view="photos">Фото</button>
+          <button type="button" data-view="videos">Видео</button>
+          <button type="button" data-view="pending">Не разобраны</button>
+        </div>
+        <div id="scan-status" class="scan-status" hidden>
+          <div class="scan-copy"><strong id="scan-text"></strong><small id="scan-detail"></small></div>
+          <div class="scan-progress-track" role="progressbar" aria-label="Ход сканирования" aria-valuemin="0" aria-valuemax="100"><span id="scan-progress-fill"></span></div>
+          <strong id="scan-percent">0%</strong>
+          <button id="scan-errors-button" class="scan-errors-link" hidden>Ошибки</button>
+          <button id="resume-scan" class="icon-button" aria-label="Продолжить сканирование" title="Продолжить" hidden>▶</button>
+          <button id="stop-scan" class="icon-button" aria-label="Приостановить сканирование" title="Пауза">Ⅱ</button>
         </div>
         <div class="stats">
           <div>
@@ -158,15 +159,6 @@
             <p>Кадры, которые стоит оставить</p>
           </div>
         </div>
-        <div id="scan-status" class="scan-status" hidden>
-          <span class="spinner"></span>
-          <div>
-            <strong id="scan-text"></strong><small id="scan-detail"></small>
-          </div>
-          <button id="resume-scan" class="button primary" hidden>
-            Продолжить</button
-          ><button id="stop-scan" class="button secondary">Пауза</button>
-        </div>
         <div class="workflow-toolbar">
           <button class="button primary" id="start-cull">
             ◈ Выбрать лучшие</button
@@ -186,14 +178,7 @@
             <select id="root-filter" aria-label="Фильтр по папке" title="Показывать файлы из папки" hidden>
               <option value="">Все папки</option>
             </select>
-            <label class="search"
-              ><span>⌕</span
-              ><input
-                id="search"
-                placeholder="Найти файл"
-                aria-label="Поиск по имени"
-              /><kbd>/</kbd></label
-            ><select id="sort" aria-label="Сортировка">
+            <select id="sort" aria-label="Сортировка">
               <option value="date">По дате</option>
               <option value="name">По имени</option>
               <option value="quality">По резкости</option>
@@ -256,6 +241,23 @@
         </footer>
       </section>
     </main>
+    <aside class="review-inspector" id="review-inspector" aria-labelledby="review-title">
+      <div class="inspector-heading">
+        <p class="eyebrow">РАЗБОР КОЛЛЕКЦИИ</p>
+        <h2 id="review-title">Быстрый разбор</h2>
+        <p id="quick-review-count">Похожие группы появятся после сканирования</p>
+        <p id="review-scope">Область: все папки</p>
+      </div>
+      <section class="review-card" aria-labelledby="quick-group-title">
+        <div class="review-card-heading"><h3 id="quick-group-title">Похожие файлы</h3><span id="quick-group-progress"></span></div>
+        <div id="quick-review-items" class="quick-review-items"></div>
+        <p id="quick-review-hint">Добавьте папку, чтобы найти похожие кадры и серии.</p>
+        <button class="button secondary full-width" id="quick-review-open" disabled>Сравнить группу</button>
+        <div class="review-separator"></div>
+        <button class="button secondary full-width" id="quick-duplicates-open">Открыть полный план дублей</button>
+      </section>
+      <div class="review-safe-note"><span aria-hidden="true">ⓘ</span><p>Перемещение в корзину доступно после проверки полного плана. Файлы можно восстановить.</p></div>
+    </aside>
     <dialog id="import-dialog">
       <form id="import-form">
         <div class="dialog-heading">
@@ -331,6 +333,13 @@
           ><input type="checkbox" id="sync-video" checked /> Синхронное
           воспроизведение и перемотка</label
         >
+        <div id="video-samples" role="group" aria-label="Быстрый просмотр сцен">
+          <span>Сравнить сцены:</span>
+          <button type="button" data-scene="0.05" disabled>Начало</button>
+          <button type="button" data-scene="0.25" disabled>25%</button>
+          <button type="button" data-scene="0.50" disabled>50%</button>
+          <button type="button" data-scene="0.75" disabled>75%</button>
+        </div>
       </div>
       <div id="filmstrip"></div>
       <div id="cull-controls" hidden>
@@ -477,16 +486,32 @@
           ✕
         </button>
       </div>
-      <h2>Одна копия каждого момента.</h2>
+      <h2>Полный план дублей</h2>
       <p id="duplicates-summary"></p>
       <p class="dialog-note">
-        Приоритет: избранное, затем предпочтительная папка. Избранные копии
-        защищены. Перед перемещением сохраняемая копия проверяется повторно.
+        Сохраняемая копия остаётся на месте. Выберите файлы для корзины после проверки путей и превью. Перед переносом приложение повторно проверит содержимое.
       </p>
+      <div class="plan-toolbar"><span id="duplicates-visible-count"></span><button id="select-visible-duplicates" type="button" class="button secondary">Выбрать показанных</button><button id="clear-duplicates" type="button" class="button secondary">Снять выбор</button></div>
       <div id="duplicates-list"></div>
+      <button id="more-duplicates" type="button" class="button secondary full-width" hidden>Показать ещё</button>
       <button id="apply-duplicates" class="button primary full-width">
-        Переместить лишние копии в корзину
+        Проверить выбранные файлы
       </button>
+    </dialog>
+    <dialog id="duplicates-confirm-dialog">
+      <div class="dialog-heading"><span class="eyebrow">ПРОВЕРКА ПЕРЕД ПЕРЕНОСОМ</span><button class="icon-button close-dialog" aria-label="Закрыть">✕</button></div>
+      <h2>Переместить выбранные копии?</h2>
+      <p id="duplicates-confirm-summary"></p>
+      <p class="dialog-note">Оригиналы будут доступны в корзине PhotoSort. Сохраняемая копия каждой группы останется на месте.</p>
+      <div class="confirm-actions"><button id="duplicates-confirm-cancel" class="button secondary">Вернуться к плану</button><button id="duplicates-confirm-apply" class="button primary">Переместить в корзину</button></div>
+    </dialog>
+    <dialog id="scan-errors-dialog">
+      <div class="dialog-heading"><span class="eyebrow">ПРОБЛЕМЫ СКАНИРОВАНИЯ</span><button class="icon-button close-dialog" aria-label="Закрыть">✕</button></div>
+      <h2>Ошибки импорта</h2>
+      <p id="scan-errors-summary"></p>
+      <div id="scan-errors-list"></div>
+      <button id="scan-errors-more" class="button secondary full-width" hidden>Показать ещё ошибки</button>
+      <div class="confirm-actions"><button id="scan-errors-select-all" class="button secondary">Выбрать показанные</button><button id="scan-errors-retry" class="button primary" disabled>Повторить выбранные</button></div>
     </dialog>
     <div id="toast" role="status" hidden></div>
   </body>
