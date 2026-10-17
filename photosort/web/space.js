@@ -30,6 +30,7 @@ function progress(p) {
   $("#scan-banner").hidden=!state.running;
   $("#scan-button").disabled=state.running;
   $("#choose-folder").disabled=state.running;
+  exclusionControls();
   $("#scan-label").textContent="Анализируем пространство";
   $("#scan-current").textContent=p.current||p.root;
   $("#scan-counts").textContent=`Файлов: ${num(p.files)} · ${bytes(p.bytes)}`;
@@ -63,6 +64,10 @@ async function refresh() {
     const b=node("button","drive-tab");b.dataset.drive=d.path;b.append(window.PhotoSortIcons.create("drive"),node("span","",`Диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно`));b.onclick=()=>{state.drive=d.path;renderDrive();};return b;
   }));
   renderDrive();progress(info.progress);
+  $("#exclusion-count").textContent=num(info.exclusion_count);
+  $("#scan-exclusion-count").textContent=num(info.exclusion_count);
+  $("#exclusions-warning").hidden=!info.exclusions_pending;
+  if(info.exclusions_pending)state.selected.clear();selection();
   $("#admin-button").disabled=info.administrator||!desktop||state.running;
   $("#admin-button").textContent=info.administrator?"◇ Права администратора":"◇ Администратор";
   $("#admin-button").title=info.administrator?"Приложение уже запущено с повышенными правами":!desktop?"Повышение прав доступно в настольном приложении":state.running?"Сначала остановите текущий анализ":"Перезапустить с правами администратора";
@@ -109,6 +114,37 @@ function openScan(folder=false) {$("#scan-path").value=folder?"":selectedDrive()
 $("#scan-button").onclick=()=>openScan();$("#choose-folder").onclick=()=>openScan(true);
 $("#browse-path").onclick=()=>action(async()=>{const r=await api("/api/pick",{});if(r.path)$("#scan-path").value=r.path;});
 $("#scan-form").onsubmit=e=>{e.preventDefault();action(async()=>{await api("/api/space/scan",{path:$("#scan-path").value.trim()});$("#scan-dialog").close();await refresh();});};
+let exclusionPaths=[];
+function exclusionAction(fn) {return action(async()=>{try{$("#exclusion-error").hidden=true;await fn();}catch(e){$("#exclusion-error").textContent=e.message;$("#exclusion-error").hidden=false;}});}
+function exclusionControls() {
+  for(const id of ["exclusion-path","add-exclusion","exclude-folder","exclude-file"])$("#"+id).disabled=state.running;
+  $$("#exclusion-list button").forEach(b=>b.disabled=state.running);
+  $("#exclusion-status").textContent=state.running?"Анализ идёт. Остановите его, чтобы изменить исключения.":"Изменения сохраняются сразу и применяются при следующем анализе. Фото- и видеоразбор имеет отдельную библиотеку.";
+}
+function renderExclusions() {
+  $("#exclusion-total").textContent=`${num(exclusionPaths.length)} / 256`;
+  $("#exclusion-list").replaceChildren(...exclusionPaths.map((path,index)=>{
+    const row=node("div","exclusion-row"),copy=node("div","exclusion-copy");copy.dataset.plainText="";
+    copy.append(node("strong","",basename(path)),node("small","",path));copy.title=path;
+    const remove=node("button","icon-button");remove.type="button";remove.setAttribute("aria-label",`Убрать исключение ${path}`);remove.title="Убрать исключение";remove.append(window.PhotoSortIcons.create("close"));
+    remove.onclick=()=>exclusionAction(()=>saveExclusions(exclusionPaths.filter((_,i)=>i!==index)));
+    row.append(window.PhotoSortIcons.create("shield"),copy,remove);return row;
+  }));
+  if(!exclusionPaths.length)$("#exclusion-list").append(empty("Исключений пока нет.<br>Добавьте папки, которые не нужно анализировать."));
+  exclusionControls();
+}
+async function openExclusions() {
+  $("#exclusion-error").hidden=true;const data=await api("/api/space/exclusions");exclusionPaths=data.paths;renderExclusions();
+  $("#exclusions-dialog").showModal();if(!state.running)$("#exclusion-path").focus();
+}
+async function saveExclusions(paths) {
+  const data=await api("/api/space/exclusions",{paths});exclusionPaths=data.paths;renderExclusions();
+  $("#exclusion-path").value="";await refresh();toast("Исключения сохранены. Применятся при следующем анализе.");
+}
+$("#exclusions-button").onclick=()=>action(openExclusions);
+$("#scan-exclusions").onclick=()=>action(openExclusions);
+$("#exclusion-form").onsubmit=e=>{e.preventDefault();const path=$("#exclusion-path").value.trim();if(path)exclusionAction(()=>saveExclusions([...exclusionPaths,path]));};
+for(const [id,endpoint]of [["exclude-folder","/api/pick"],["exclude-file","/api/space/pick-file"]])$("#"+id).onclick=()=>exclusionAction(async()=>{const r=await api(endpoint,{});if(r.path){$("#exclusion-path").value=r.path;$("#add-exclusion").focus();}});
 $("#stop-scan").onclick=()=>action(async()=>{await api("/api/space/stop",{});toast("Остановка после текущей пачки файлов. Частичный результат останется доступен.");});
 $$("[data-close]").forEach(b=>b.onclick=()=>b.closest("dialog").close());
 async function loadFiles() {
@@ -118,7 +154,7 @@ async function loadFiles() {
   state.files=data.files;state.total=data.total;
   $("#all-files").textContent=state.mode==="all"?"Только от 100 МБ":"Показать все размеры";
   $("#file-list").replaceChildren(...data.files.map(f=>{
-    const r=node("div","file-row");const check=node("input");check.type="checkbox";check.checked=state.selected.has(f.id);check.disabled=f.protected||state.running;check.setAttribute("aria-label",`Выбрать ${basename(f.path)}`);check.onchange=()=>{if(check.checked){if(state.selected.size>=500){check.checked=false;toast("Выберите до 500 файлов за одну операцию");return;}state.selected.set(f.id,f);}else state.selected.delete(f.id);selection();};
+    const r=node("div","file-row");const check=node("input");check.type="checkbox";check.checked=state.selected.has(f.id);check.disabled=f.protected||state.running||!!state.info?.exclusions_pending;check.setAttribute("aria-label",`Выбрать ${basename(f.path)}`);check.onchange=()=>{if(check.checked){if(state.selected.size>=500){check.checked=false;toast("Выберите до 500 файлов за одну операцию");return;}state.selected.set(f.id,f);}else state.selected.delete(f.id);selection();};
     const copy=node("div","file-copy");copy.append(node("strong","",basename(f.path)),node("small","",f.path));copy.title=f.path;
     const reveal=node("button","icon-button","↗");reveal.title="Показать в Проводнике";reveal.setAttribute("aria-label",`Показать ${basename(f.path)} в Проводнике`);reveal.onclick=()=>action(()=>api("/api/space/reveal",{id:f.id}));
     const lock=node("span","protected-symbol","◇");lock.title="Системный или служебный файл. Перенос защищён.";
@@ -130,7 +166,7 @@ async function loadFiles() {
   $("#previous").disabled=state.offset===0;$("#next").disabled=state.offset+60>=data.total;
   selection();
 }
-function selection() {const values=[...state.selected.values()];$("#selection-toolbar").hidden=!values.length;$("#selection-summary").textContent=`Выбрано ${num(values.length)} · ${bytes(values.reduce((n,f)=>n+f.size,0))}`;$("#quarantine-selected").disabled=state.running;}
+function selection() {const values=[...state.selected.values()];$("#selection-toolbar").hidden=!values.length;$("#selection-summary").textContent=`Выбрано ${num(values.length)} · ${bytes(values.reduce((n,f)=>n+f.size,0))}`;$("#quarantine-selected").disabled=state.running||!!state.info?.exclusions_pending;}
 $("#previous").onclick=()=>action(async()=>{state.offset=Math.max(0,state.offset-60);await loadFiles();});
 $("#next").onclick=()=>action(async()=>{state.offset+=60;await loadFiles();});
 $("#file-search").oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>action(async()=>{state.search=$("#file-search").value;state.offset=0;await loadFiles();}),250);};
@@ -233,6 +269,6 @@ $("#admin-button").onclick=()=>$("#admin-dialog").showModal();
 $("#confirm-admin").onclick=()=>{if(desktop){$("#admin-dialog").close();window.ipc.postMessage("elevate");}};
 $$("[data-window-command]").forEach(b=>{b.disabled=!desktop;b.onclick=()=>window.ipc?.postMessage(b.dataset.windowCommand);});
 if(desktop){$$(".window-dots,.topbar").forEach(r=>r.addEventListener("mousedown",e=>{if(e.button!==0||e.target.closest("button,a,input,select"))return;e.preventDefault();window.ipc.postMessage(e.detail===2?"maximize":"drag");}));for(const d of ["n","s","e","w","ne","nw","se","sw"]){const edge=node("div",`window-resize window-resize-${d}`);edge.onpointerdown=e=>{if(e.button===0)window.ipc.postMessage(`resize:${d}`);};document.body.append(edge);}}
-async function poll(){try{const wasRunning=state.running;const p=await api("/api/space/progress");progress(p);if(wasRunning&&!state.running)await refresh();}catch(e){console.warn("Progress unavailable",e);}finally{setTimeout(poll,state.running?1000:8000);}}
+async function poll(){try{const wasRunning=state.running;const p=await api("/api/space/progress");const changed=p.id!==state.scan;progress(p);if(changed||(wasRunning&&!state.running))await refresh();}catch(e){console.warn("Progress unavailable",e);}finally{setTimeout(poll,state.running?1000:8000);}}
 async function init(){theme("light",false);try{const session=await api("/api/session");state.token=session.token;await refresh();}catch(e){toast(e.message);}poll();}
 init();

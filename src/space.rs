@@ -67,6 +67,58 @@ fn normal(path: &Path) -> PathBuf {
 fn canonical(path: &Path) -> Result<PathBuf> {
     Ok(normal(&fs::canonicalize(path)?))
 }
+fn path_key(path: &Path) -> String {
+    let key = normal(path).to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    let key = key.to_lowercase();
+    key.trim_end_matches('/').to_string()
+}
+fn excluded(path: &Path, keys: &[String]) -> bool {
+    if keys.is_empty() {
+        return false;
+    }
+    let path = path_key(path);
+    keys.binary_search(&path).is_ok()
+        || path.match_indices('/').any(|(i, _)| {
+            keys.binary_search_by(|key| key.as_str().cmp(&path[..i]))
+                .is_ok()
+        })
+}
+fn exclusion_path(value: &str) -> Result<PathBuf> {
+    let path = normal(Path::new(value.trim()));
+    if !path.is_absolute() || value.len() > 32768 || value.contains('\0') {
+        bail!("Укажите полный путь к папке или файлу")
+    }
+    let mut clean = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    // Resolve existing ancestors too: a temporarily absent file may live under a junction.
+    let mut ancestor = clean.as_path();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            break;
+        };
+        suffix.push(name.to_owned());
+        ancestor = ancestor.parent().context("Некорректный путь")?;
+    }
+    let mut resolved = if ancestor.exists() {
+        canonical(ancestor)?
+    } else {
+        ancestor.to_path_buf()
+    };
+    for name in suffix.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
 fn timestamp(meta: &fs::Metadata) -> u64 {
     meta.modified()
         .ok()
@@ -130,6 +182,9 @@ impl Space {
           CREATE TABLE IF NOT EXISTS folders(scan INTEGER,path TEXT,parent TEXT,bytes INTEGER,files INTEGER,PRIMARY KEY(scan,path));
           CREATE INDEX IF NOT EXISTS space_parent ON folders(scan,parent,bytes DESC);
           CREATE TABLE IF NOT EXISTS trash(id INTEGER PRIMARY KEY,original TEXT,vault TEXT,root TEXT,size INTEGER,hash TEXT,state TEXT,created INTEGER);
+          CREATE TABLE IF NOT EXISTS exclusions(path TEXT PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS space_settings(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
+          INSERT OR IGNORE INTO space_settings VALUES('exclusions_revision',0),('scan_exclusions_revision',0);
           UPDATE scans SET state='interrupted' WHERE state='running';")?;
         let columns = db
             .prepare("PRAGMA table_info(files)")?
@@ -253,6 +308,52 @@ impl Space {
                     .is_some_and(|tail| tail.starts_with(['\\', '/']))
         })
     }
+    pub fn exclusions(&self) -> Result<Vec<String>> {
+        Ok(self
+            .db
+            .lock()
+            .prepare("SELECT path FROM exclusions ORDER BY path")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    pub fn save_exclusions(&self, paths: &[String]) -> Result<Value> {
+        let _guard = self.mutation.lock();
+        if self.progress.lock().state == "running" {
+            bail!("Сначала остановите анализ, чтобы изменить исключения")
+        }
+        if paths.len() > 256 {
+            bail!("Можно добавить не больше 256 исключений")
+        }
+        let mut unique = std::collections::BTreeMap::new();
+        for value in paths {
+            let path = exclusion_path(value)?;
+            unique
+                .entry(path_key(&path))
+                .or_insert_with(|| path.to_string_lossy().into_owned());
+        }
+        let existing = self
+            .exclusions()?
+            .iter()
+            .map(|p| path_key(Path::new(p)))
+            .collect::<std::collections::BTreeSet<_>>();
+        if existing != unique.keys().cloned().collect() {
+            let mut db = self.db.lock();
+            let tx = db.transaction()?;
+            tx.execute("DELETE FROM exclusions", [])?;
+            for path in unique.values() {
+                tx.execute("INSERT INTO exclusions(path) VALUES(?)", [path])?;
+            }
+            tx.execute(
+                "UPDATE space_settings SET value=value+1 WHERE key='exclusions_revision'",
+                [],
+            )?;
+            tx.commit()?;
+        }
+        Ok(json!({"paths":self.exclusions()?}))
+    }
+    fn exclusions_pending(db: &Connection) -> Result<bool> {
+        Ok(db.query_row("SELECT (SELECT value FROM space_settings WHERE key='exclusions_revision')<>(SELECT value FROM space_settings WHERE key='scan_exclusions_revision')", [], |r| r.get(0))?)
+    }
     pub fn start(self: &Arc<Self>, path: &str) -> Result<Value> {
         let _guard = self.mutation.lock();
         if self.progress.lock().state == "running" {
@@ -265,13 +366,26 @@ impl Space {
         if !root.is_dir() || root.starts_with(&self.data) {
             bail!("Выберите диск или папку с файлами")
         }
+        let mut exclusions = self
+            .exclusions()?
+            .iter()
+            .map(|p| path_key(Path::new(p)))
+            .collect::<Vec<_>>();
+        exclusions.sort_unstable();
+        if excluded(&root, &exclusions) {
+            bail!("Этот путь входит в исключения. Выберите другую папку или измените исключения")
+        }
         let id = {
-            let db = self.db.lock();
-            db.execute(
+            let mut db = self.db.lock();
+            let tx = db.transaction()?;
+            tx.execute("UPDATE space_settings SET value=(SELECT value FROM space_settings WHERE key='exclusions_revision') WHERE key='scan_exclusions_revision'", [])?;
+            tx.execute(
                 "INSERT INTO scans(root,state,started) VALUES(?,'running',?)",
                 params![root.to_string_lossy(), now()],
             )?;
-            db.last_insert_rowid()
+            let id = tx.last_insert_rowid();
+            tx.commit()?;
+            id
         };
         self.cancel.store(false, Ordering::Relaxed);
         *self.progress.lock() = ScanProgress {
@@ -283,7 +397,7 @@ impl Space {
         };
         let space = self.clone();
         *self.worker.lock() = Some(thread::spawn(move || {
-            if let Err(error) = space.scan(id, &root) {
+            if let Err(error) = space.scan(id, &root, &exclusions) {
                 space.progress.lock().state = "error".into();
                 space.progress.lock().current = error.to_string();
                 let _ = space
@@ -303,7 +417,7 @@ impl Space {
             let _ = worker.join();
         }
     }
-    fn scan(&self, id: i64, root: &Path) -> Result<()> {
+    fn scan(&self, id: i64, root: &Path, exclusions: &[String]) -> Result<()> {
         let temp_root = std::env::var_os("TEMP")
             .map(PathBuf::from)
             .and_then(|p| canonical(&p).ok());
@@ -328,6 +442,7 @@ impl Space {
                         | "$recycle.bin"
                         | "system volume information"
                 ) && !entry.path().starts_with(&self.data)
+                    && !excluded(entry.path(), exclusions)
             });
         for entry in walker {
             if self.cancel.load(Ordering::Relaxed) {
@@ -430,6 +545,9 @@ impl Space {
     pub fn status(&self) -> Result<Value> {
         let p = self.progress.lock().clone();
         let db = self.db.lock();
+        let exclusions_pending = p.id != 0 && Self::exclusions_pending(&db)?;
+        let exclusion_count: u64 =
+            db.query_row("SELECT COUNT(*) FROM exclusions", [], |r| r.get(0))?;
         let categories=db.prepare("SELECT category,SUM(size),COUNT(*) FROM files WHERE scan=? GROUP BY category ORDER BY SUM(size) DESC")?.query_map([p.id],|r|Ok(json!({"category":r.get::<_,String>(0)?,"bytes":r.get::<_,u64>(1)?,"files":r.get::<_,u64>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let cleanup:(u64,u64)=db.query_row("SELECT COALESCE(SUM(size),0),COUNT(*) FROM files WHERE scan=? AND temporary=1 AND protected=0",[p.id],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let large:(u64,u64)=db.query_row("SELECT COALESCE(SUM(size),0),COUNT(*) FROM files WHERE scan=? AND size>=104857600 AND protected=0",[p.id],|r|Ok((r.get(0)?,r.get(1)?)))?;
@@ -439,7 +557,7 @@ impl Space {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok(
-            json!({"progress":p,"drives":drives(),"administrator":is_administrator(),"categories":categories,"temporary":{"bytes":cleanup.0,"files":cleanup.1},"large":{"bytes":large.0,"files":large.1},"trash":{"bytes":trash.0,"files":trash.1},"size_kind":"logical"}),
+            json!({"progress":p,"exclusions_pending":exclusions_pending,"exclusion_count":exclusion_count,"drives":drives(),"administrator":is_administrator(),"categories":categories,"temporary":{"bytes":cleanup.0,"files":cleanup.1},"large":{"bytes":large.0,"files":large.1},"trash":{"bytes":trash.0,"files":trash.1},"size_kind":"logical"}),
         )
     }
     pub fn files(
@@ -684,6 +802,9 @@ impl Space {
         if p.state == "running" || p.id != scan {
             bail!("Дождитесь окончания анализа и обновите список")
         }
+        if Self::exclusions_pending(&self.db.lock())? {
+            bail!("Исключения изменились. Повторите анализ перед очисткой")
+        }
         if ids.is_empty() || ids.len() > 500 {
             bail!("Выберите от 1 до 500 файлов")
         }
@@ -697,7 +818,15 @@ impl Space {
                 continue;
             }
             let result = (|| -> Result<()> {
-                let file = self.file(*id)?;
+                let file = self
+                    .db
+                    .lock()
+                    .query_row(
+                        &format!("SELECT {COLS} FROM files WHERE id=? AND scan=?"),
+                        params![id, scan],
+                        row,
+                    )
+                    .context("Файл отсутствует в текущем анализе")?;
                 let path = Path::new(&file.path);
                 if file.protected || self.protected(path) {
                     bail!("Системный или служебный файл защищён")

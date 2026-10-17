@@ -357,6 +357,24 @@ fn space_routes_preserve_media_and_share_persistent_theme() {
             .starts_with("HTTP/1.1 400")
     );
     assert_eq!(library.settings().theme, "dark");
+    assert!(request("/api/space/exclusions", None, "").contains("\"paths\":[]"));
+    assert!(request("/api/space/exclusions", Some(r#"{"paths":[]}"#), "").contains("403"));
+    assert!(
+        request("/api/space/exclusions", Some(r#"{"paths":[]}"#), token)
+            .starts_with("HTTP/1.1 200")
+    );
+    assert!(
+        request(
+            "/api/space/exclusions",
+            Some(r#"{"paths":["relative"]}"#),
+            token
+        )
+        .starts_with("HTTP/1.1 400")
+    );
+    assert!(
+        request("/api/space/exclusions", Some(r#"{"paths":[42]}"#), token)
+            .starts_with("HTTP/1.1 400")
+    );
     library.close();
     thread::sleep(Duration::from_millis(250));
 }
@@ -452,4 +470,144 @@ fn map_migrates_v06_parent_index_without_rescanning_or_losing_trash() {
     assert_eq!(reopened.restore(&[stored_id]).unwrap()["done"], 1);
     assert_eq!(fs::read(f.root.join("docs/b.bin")).unwrap(), b"recoverable");
     reopened.close();
+}
+
+#[test]
+fn exclusions_prune_nested_folders_and_exact_files_without_prefix_collisions() {
+    let f = Fixture::new();
+    let secret = f.write("Личное/nested/secret.bin", b"secret");
+    f.write("Личное-other/keep.bin", b"keep");
+    let single = f.write("single.bin", b"single");
+    f.write("single.bin-copy", b"keep too");
+    let folder = secret.parent().unwrap().parent().unwrap();
+    f.space
+        .save_exclusions(&[
+            folder.to_string_lossy().into(),
+            single.to_string_lossy().into(),
+        ])
+        .unwrap();
+    f.scan();
+    assert_eq!(f.files()["total"], 2);
+    let map = f.space.map("", 0).unwrap();
+    assert_eq!(map["files"], 2);
+    assert_eq!(map["bytes"], 12);
+    assert!(secret.exists() && single.exists());
+    assert!(f.space.start(folder.to_str().unwrap()).is_err());
+    assert_eq!(f.space.status().unwrap()["exclusions_pending"], false);
+}
+
+#[test]
+fn exclusions_persist_deduplicate_and_cover_temporarily_missing_paths() {
+    let f = Fixture::new();
+    let missing = f.root.join("not-yet-created");
+    let path = missing.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let duplicate = path.to_uppercase().replace('\\', "/") + "/";
+    #[cfg(not(windows))]
+    let duplicate = path.clone() + "/";
+    f.space.save_exclusions(&[path.clone(), duplicate]).unwrap();
+    assert_eq!(f.space.exclusions().unwrap().len(), 1);
+    f.space.close();
+    let reopened = Space::open(&f.data).unwrap();
+    assert_eq!(reopened.exclusions().unwrap(), vec![path]);
+    f.write("not-yet-created/private.bin", b"private");
+    f.write("visible.bin", b"yes");
+    reopened.start(f.root.to_str().unwrap()).unwrap();
+    while reopened.progress.lock().state == "running" {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(reopened.progress.lock().files, 1);
+    reopened.close();
+}
+
+#[test]
+fn changing_exclusions_blocks_stale_cleanup_but_not_restore() {
+    let f = Fixture::new();
+    let kept = f.write("keep.bin", b"keep");
+    let restored = f.write("restore.bin", b"restore");
+    f.scan();
+    let scan = f.space.progress.lock().id;
+    let id = f.id("keep.bin");
+    assert_eq!(
+        f.space.quarantine(&[f.id("restore.bin")], scan).unwrap()["done"],
+        1
+    );
+    let trash_id = f.space.trash(0).unwrap()["files"][0]["id"]
+        .as_i64()
+        .unwrap();
+    f.space
+        .save_exclusions(&[f.root.to_string_lossy().into()])
+        .unwrap();
+    assert_eq!(f.space.status().unwrap()["exclusions_pending"], true);
+    assert!(
+        f.space
+            .quarantine(&[id], scan)
+            .unwrap_err()
+            .to_string()
+            .contains("Исключения")
+    );
+    assert!(kept.exists());
+    assert_eq!(f.space.restore(&[trash_id]).unwrap()["done"], 1);
+    assert!(restored.exists());
+    f.space.save_exclusions(&[]).unwrap();
+    f.scan();
+    assert_eq!(f.space.status().unwrap()["exclusions_pending"], false);
+    assert_eq!(f.files()["total"], 2);
+}
+
+#[test]
+fn exclusions_validate_atomically_and_cannot_change_during_analysis() {
+    let f = Fixture::new();
+    let path = f.root.join("private").to_string_lossy().into_owned();
+    f.space.save_exclusions(&[path.clone()]).unwrap();
+    assert!(
+        f.space
+            .save_exclusions(&[path.clone(), "relative/path".into()])
+            .is_err()
+    );
+    assert!(f.space.save_exclusions(&vec![path.clone(); 257]).is_err());
+    assert!(f.space.save_exclusions(&[String::new()]).is_err());
+    assert_eq!(f.space.exclusions().unwrap(), vec![path]);
+    f.space.progress.lock().state = "running".into();
+    assert!(f.space.save_exclusions(&[]).is_err());
+    f.space.progress.lock().state.clear();
+    f.scan();
+    f.space
+        .save_exclusions(&f.space.exclusions().unwrap())
+        .unwrap();
+    assert_eq!(f.space.status().unwrap()["exclusions_pending"], false);
+}
+
+#[test]
+fn cleanup_rejects_old_rows_after_an_interrupted_new_scan() {
+    let f = Fixture::new();
+    let path = f.write("private.bin", b"must stay");
+    f.scan();
+    let old = f.space.progress.lock().clone();
+    let id = f.id("private.bin");
+    f.space
+        .save_exclusions(&[path.to_string_lossy().into_owned()])
+        .unwrap();
+    let db = f.db();
+    db.execute(
+        "INSERT INTO scans(root,state,started) VALUES(?,'error',0)",
+        [f.root.to_string_lossy()],
+    )
+    .unwrap();
+    let scan = db.last_insert_rowid();
+    db.execute("UPDATE space_settings SET value=(SELECT value FROM space_settings WHERE key='exclusions_revision') WHERE key='scan_exclusions_revision'", []).unwrap();
+    *f.space.progress.lock() = photosort::space::ScanProgress {
+        id: scan,
+        state: "error".into(),
+        ..old
+    };
+    let result = f.space.quarantine(&[id], scan).unwrap();
+    assert_eq!(result["done"], 0);
+    assert!(
+        result["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("текущем анализе")
+    );
+    assert_eq!(fs::read(path).unwrap(), b"must stay");
 }

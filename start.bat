@@ -1,7 +1,7 @@
 @echo off
 cd /d "%~dp0"
-if exist "dist\PhotoSort-0.6.1\PhotoSort.exe" (
-  start "PhotoSort" "dist\PhotoSort-0.6.1\PhotoSort.exe"
+if exist "dist\PhotoSort-0.6.2\PhotoSort.exe" (
+  start "PhotoSort" "dist\PhotoSort-0.6.2\PhotoSort.exe"
 ) else (
   cargo run --release
 )

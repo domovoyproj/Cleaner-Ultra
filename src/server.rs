@@ -262,6 +262,7 @@ fn route(
                 info
             }
             "/api/space/progress" => serde_json::to_value(space.progress.lock().clone())?,
+            "/api/space/exclusions" => json!({"paths":space.exclusions()?}),
             "/api/space/files" => space.files(
                 &get("mode", "all"),
                 &get("search", ""),
@@ -429,6 +430,25 @@ fn route(
                 json!({"ok":true})
             }
             "/api/space/scan" => space.start(body["path"].as_str().unwrap_or(""))?,
+            "/api/space/exclusions" => {
+                let paths = body["paths"]
+                    .as_array()
+                    .context_or("Ожидается список путей")?
+                    .iter()
+                    .map(|p| {
+                        p.as_str()
+                            .map(str::to_owned)
+                            .context_or("Некорректный путь")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                space.save_exclusions(&paths)?
+            }
+            "/api/space/pick-file" => {
+                let file = rfd::FileDialog::new()
+                    .set_title("Исключить файл из анализа")
+                    .pick_file();
+                json!({"path":file.map(|p|p.to_string_lossy().to_string()).unwrap_or_default()})
+            }
             "/api/space/stop" => {
                 space.stop();
                 json!({"ok":true})
