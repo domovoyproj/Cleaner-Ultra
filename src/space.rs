@@ -673,10 +673,22 @@ impl Space {
             json!({"done":done,"errors":errors,"note":"Файлы сохранены в корзине на исходном диске. Свободное место пока не изменилось."}),
         )
     }
-    pub fn trash(&self) -> Result<Value> {
+    pub fn trash(&self, offset: i64) -> Result<Value> {
         let db = self.db.lock();
-        let rows=db.prepare("SELECT id,original,size,state,created FROM trash WHERE state IN('stored','pending','restoring') ORDER BY id DESC LIMIT 500")?.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"path":r.get::<_,String>(1)?,"size":r.get::<_,u64>(2)?,"state":r.get::<_,String>(3)?,"created":r.get::<_,u64>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(json!({"files":rows}))
+        let total: u64 = db.query_row(
+            "SELECT COUNT(*) FROM trash WHERE state IN('stored','pending','restoring')",
+            [],
+            |r| r.get(0),
+        )?;
+        let offset = if total == 0 {
+            0
+        } else {
+            offset
+                .max(0)
+                .min(((total - 1) / PAGE as u64 * PAGE as u64) as i64)
+        };
+        let rows=db.prepare("SELECT id,original,size,state,created FROM trash WHERE state IN('stored','pending','restoring') ORDER BY id DESC LIMIT ? OFFSET ?")?.query_map(params![PAGE,offset],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"path":r.get::<_,String>(1)?,"size":r.get::<_,u64>(2)?,"state":r.get::<_,String>(3)?,"created":r.get::<_,u64>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(json!({"files":rows,"total":total,"offset":offset,"page_size":PAGE}))
     }
     pub fn restore(&self, ids: &[i64]) -> Result<Value> {
         let _guard = self.mutation.lock();

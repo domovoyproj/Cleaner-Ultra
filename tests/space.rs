@@ -21,6 +21,13 @@ impl Fixture {
         let data = temp.path().join("index");
         fs::create_dir(&root).unwrap();
         let space = Space::open(&data).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        #[cfg(windows)]
+        let root = PathBuf::from(
+            root.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string(),
+        );
         Self {
             temp,
             root,
@@ -150,7 +157,7 @@ fn quarantine_and_restore_never_overwrite_and_update_map() {
     assert!(!path.exists());
     assert_eq!(f.files()["total"], 0);
     assert_eq!(f.space.progress.lock().bytes, 0);
-    let trash = f.space.trash().unwrap();
+    let trash = f.space.trash(0).unwrap();
     let tid = trash["files"][0]["id"].as_i64().unwrap();
     fs::write(&path, b"replacement").unwrap();
     assert_eq!(f.space.restore(&[tid]).unwrap()["done"], 0);
@@ -159,7 +166,7 @@ fn quarantine_and_restore_never_overwrite_and_update_map() {
     assert_eq!(f.space.restore(&[tid]).unwrap()["done"], 1);
     assert_eq!(fs::read(&path).unwrap(), b"original");
     assert!(
-        f.space.trash().unwrap()["files"]
+        f.space.trash(0).unwrap()["files"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -194,10 +201,10 @@ fn crash_recovery_preserves_replacement_and_original_copy() {
     f.space.recover().unwrap();
     assert_eq!(fs::read(&vault).unwrap(), b"original");
     assert_eq!(fs::read(&path).unwrap(), b"replacement");
-    assert_eq!(f.space.trash().unwrap()["files"][0]["state"], "pending");
+    assert_eq!(f.space.trash(0).unwrap()["files"][0]["state"], "pending");
     fs::remove_file(&path).unwrap();
     f.space.recover().unwrap();
-    assert_eq!(f.space.trash().unwrap()["files"][0]["state"], "stored");
+    assert_eq!(f.space.trash(0).unwrap()["files"][0]["state"], "stored");
     assert_eq!(f.files()["total"], 0);
 }
 #[test]
@@ -223,7 +230,7 @@ fn reopened_index_restores_interrupted_restore_journal() {
     assert_eq!(fs::read(&path).unwrap(), b"original");
     assert!(!Path::new(&vault).exists());
     assert!(
-        reopened.trash().unwrap()["files"]
+        reopened.trash(0).unwrap()["files"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -346,4 +353,28 @@ fn space_routes_preserve_media_and_share_persistent_theme() {
     assert_eq!(library.settings().theme, "dark");
     library.close();
     thread::sleep(Duration::from_millis(250));
+}
+
+#[test]
+fn trash_pagination_keeps_older_entries_accessible() {
+    let f = Fixture::new();
+    let mut db = f.db();
+    let tx = db.transaction().unwrap();
+    for i in 0..601 {
+        tx.execute("INSERT INTO trash(original,vault,root,size,hash,state,created) VALUES(?,'','','1','','stored',1)", [format!("file-{i}")]).unwrap();
+    }
+    tx.commit().unwrap();
+    let first = f.space.trash(0).unwrap();
+    let last = f.space.trash(600).unwrap();
+    assert_eq!(first["total"], 601);
+    assert_eq!(first["files"].as_array().unwrap().len(), 60);
+    assert_eq!(last["files"].as_array().unwrap().len(), 1);
+    assert_eq!(last["files"][0]["path"], "file-0");
+    assert_eq!(f.space.trash(i64::MAX).unwrap()["offset"], 600);
+    assert_eq!(f.space.trash(-1).unwrap()["offset"], 0);
+    db.execute("UPDATE trash SET state='restored' WHERE id=1", [])
+        .unwrap();
+    let adjusted = f.space.trash(600).unwrap();
+    assert_eq!(adjusted["offset"], 540);
+    assert_eq!(adjusted["files"].as_array().unwrap().len(), 60);
 }

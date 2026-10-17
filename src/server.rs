@@ -272,7 +272,7 @@ fn route(
             "/api/space/folders" => {
                 space.folders(&get("path", ""), get("offset", "0").parse().unwrap_or(0))?
             }
-            "/api/space/trash" => space.trash()?,
+            "/api/space/trash" => space.trash(get("offset", "0").parse().unwrap_or(0))?,
             "/api/session" => {
                 json!({"token":token,"version":env!("CARGO_PKG_VERSION"),"engine":"Rust"})
             }
