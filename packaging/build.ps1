@@ -18,6 +18,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Video integration tests failed' }
 node --check photosort/web/app.js
 if ($LASTEXITCODE -ne 0) { throw 'Frontend validation failed' }
+node --check photosort/web/space.js
+if ($LASTEXITCODE -ne 0) { throw 'Space frontend validation failed' }
 node --check photosort/web/face-worker.js
 if ($LASTEXITCODE -ne 0) { throw 'Face worker validation failed' }
 & cargo @cargoArgs build --release --locked

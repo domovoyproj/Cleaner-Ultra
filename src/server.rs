@@ -16,6 +16,7 @@ use std::{
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
+    let space = crate::space::Space::open(&library.data)?;
     let server =
         Arc::new(Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!(e.to_string()))?);
     let address = server.server_addr().to_ip().unwrap();
@@ -30,9 +31,11 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
         let token = token.clone();
         let host = host.clone();
         let streams = streams.clone();
+        let space = space.clone();
         thread::spawn(move || {
             loop {
                 if library.is_closed() {
+                    space.close();
                     break;
                 }
                 let mut request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -85,7 +88,7 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
                     }
                     continue;
                 }
-                let result = route(&library, &token, &mut request);
+                let result = route(&library, &space, &token, &mut request);
                 match result {
                     Ok((bytes, mime)) => respond(request, bytes, &mime, 200),
                     Err(error) => respond(
@@ -241,13 +244,35 @@ impl<T> ContextOption<T> for Option<T> {
         self.ok_or_else(|| anyhow::anyhow!(text.to_string()))
     }
 }
-fn route(library: &Arc<Library>, token: &str, request: &mut Request) -> Result<(Vec<u8>, String)> {
+fn route(
+    library: &Arc<Library>,
+    space: &Arc<crate::space::Space>,
+    token: &str,
+    request: &mut Request,
+) -> Result<(Vec<u8>, String)> {
     let url = url::Url::parse(&format!("http://127.0.0.1{}", request.url()))?;
     let path = url.path();
     let parameters: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     let get = |name: &str, default: &str| parameters.get(name).cloned().unwrap_or(default.into());
     let value = if *request.method() == Method::Get {
         match path {
+            "/api/space/status" => {
+                let mut info = space.status()?;
+                info["theme"] = json!(library.settings().theme);
+                info
+            }
+            "/api/space/progress" => serde_json::to_value(space.progress.lock().clone())?,
+            "/api/space/files" => space.files(
+                &get("mode", "all"),
+                &get("search", ""),
+                get("offset", "0").parse().unwrap_or(0),
+                &get("folder", ""),
+                &get("category", ""),
+            )?,
+            "/api/space/folders" => {
+                space.folders(&get("path", ""), get("offset", "0").parse().unwrap_or(0))?
+            }
+            "/api/space/trash" => space.trash()?,
             "/api/session" => {
                 json!({"token":token,"version":env!("CARGO_PKG_VERSION"),"engine":"Rust"})
             }
@@ -271,6 +296,24 @@ fn route(library: &Arc<Library>, token: &str, request: &mut Request) -> Result<(
                 library.next_group_filtered(&get("kind", "similar"), &get("root", ""))?
             }
             "/" => {
+                return Ok((
+                    include_bytes!("../photosort/web/space.html").to_vec(),
+                    "text/html; charset=utf-8".into(),
+                ));
+            }
+            "/space.js" => {
+                return Ok((
+                    include_bytes!("../photosort/web/space.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/space.css" => {
+                return Ok((
+                    include_bytes!("../photosort/web/space.css").to_vec(),
+                    "text/css; charset=utf-8".into(),
+                ));
+            }
+            "/photos" => {
                 return Ok((
                     include_bytes!("../photosort/web/index.html").to_vec(),
                     "text/html; charset=utf-8".into(),
@@ -354,6 +397,37 @@ fn route(library: &Arc<Library>, token: &str, request: &mut Request) -> Result<(
         };
         let body: Value = serde_json::from_slice(if bytes.is_empty() { b"{}" } else { &bytes })?;
         match path {
+            "/api/space/theme" => {
+                let theme = body["theme"].as_str().context_or("Выберите тему")?;
+                if !["light", "dark", "system"].contains(&theme) {
+                    bail!("Неизвестная тема")
+                }
+                let mut settings = library.settings();
+                settings.theme = theme.into();
+                library.save_settings(settings)?;
+                json!({"ok":true})
+            }
+            "/api/space/scan" => space.start(body["path"].as_str().unwrap_or(""))?,
+            "/api/space/stop" => {
+                space.stop();
+                json!({"ok":true})
+            }
+            "/api/space/trash" => space.quarantine(
+                &ids(&body)?,
+                body["scan"].as_i64().context_or("Обновите анализ")?,
+            )?,
+            "/api/space/restore" => space.restore(&ids(&body)?)?,
+            "/api/space/reveal" => {
+                space.reveal(body["id"].as_i64().context_or("Выберите файл")?)?
+            }
+            "/api/space/reveal-trash" => {
+                space.reveal_trash(body["id"].as_i64().context_or("Выберите файл")?)?
+            }
+            "/api/space/optimize" => crate::space::optimize_drive(
+                body["drive"].as_str().unwrap_or(""),
+                body["analyze"].as_bool().unwrap_or(false),
+            )?,
+            "/api/space/system" => crate::space::system_page(body["page"].as_str().unwrap_or(""))?,
             "/api/scan" => {
                 library.start(body["path"].as_str().unwrap_or(""), false)?;
                 json!({"ok":true})

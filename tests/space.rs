@@ -1,0 +1,349 @@
+use photosort::space::Space;
+use rusqlite::{Connection, params};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+
+struct Fixture {
+    temp: tempfile::TempDir,
+    root: PathBuf,
+    data: PathBuf,
+    space: Arc<Space>,
+}
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("files");
+        let data = temp.path().join("index");
+        fs::create_dir(&root).unwrap();
+        let space = Space::open(&data).unwrap();
+        Self {
+            temp,
+            root,
+            data,
+            space,
+        }
+    }
+    fn write(&self, path: &str, content: &[u8]) -> PathBuf {
+        let path = self.root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        path
+    }
+    fn scan(&self) {
+        self.space.start(self.root.to_str().unwrap()).unwrap();
+        self.wait();
+        assert_eq!(self.space.progress.lock().state, "complete");
+    }
+    fn wait(&self) {
+        let start = Instant::now();
+        while self.space.progress.lock().state == "running" {
+            assert!(start.elapsed() < Duration::from_secs(30));
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn files(&self) -> serde_json::Value {
+        self.space.files("all", "", 0, "", "").unwrap()
+    }
+    fn id(&self, name: &str) -> i64 {
+        self.files()["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| Path::new(f["path"].as_str().unwrap()).file_name().unwrap() == name)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    }
+    fn db(&self) -> Connection {
+        Connection::open(self.data.join("space.sqlite3")).unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.space.close();
+    }
+}
+
+#[test]
+fn scan_all_file_types_counts_nested_folders_and_preserves_sources() {
+    let f = Fixture::new();
+    f.write("docs/Отчёт.PDF", b"not a decoded PDF");
+    f.write("docs/nested/a.bin", b"1234");
+    f.write("clips/clip.mp4", b"invalid video still counted");
+    f.write(".photosort-space-trash/hidden.bin", b"ignored");
+    f.write(".photosort-trash/hidden.jpg", b"ignored");
+    f.scan();
+    assert_eq!(f.files()["total"], 3);
+    let p = f.space.progress.lock().clone();
+    assert_eq!(p.files, 3);
+    assert_eq!(p.errors, 0);
+    let folders = f.space.folders("", 0).unwrap();
+    assert_eq!(folders["folders"].as_array().unwrap().len(), 2);
+    let docs = folders["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["path"].as_str().unwrap().ends_with("docs"))
+        .unwrap();
+    assert_eq!(docs["files"], 2);
+    assert_eq!(docs["bytes"], 21);
+    assert_eq!(
+        f.space.files("all", "ОТЧЁТ", 0, "", "").unwrap()["total"],
+        1
+    );
+    assert_eq!(
+        f.space.files("all", "", 0, "", "video").unwrap()["total"],
+        1
+    );
+    assert!(f.root.join("docs/Отчёт.PDF").exists());
+}
+#[test]
+fn large_files_and_pagination_do_not_decode_or_truncate_results() {
+    let f = Fixture::new();
+    for i in 0..75 {
+        f.write(&format!("f{i:03}.bin"), b"file");
+    }
+    let huge = f.write("large.iso", b"");
+    fs::File::options()
+        .write(true)
+        .open(huge)
+        .unwrap()
+        .set_len(120 * 1024 * 1024)
+        .unwrap();
+    f.scan();
+    assert_eq!(f.space.files("large", "", 0, "", "").unwrap()["total"], 1);
+    let first = f.files();
+    let second = f.space.files("all", "", 60, "", "").unwrap();
+    assert_eq!(first["total"], 76);
+    assert_eq!(first["files"].as_array().unwrap().len(), 60);
+    assert_eq!(second["files"].as_array().unwrap().len(), 16);
+}
+#[test]
+fn folder_filter_escapes_sql_wildcards() {
+    let f = Fixture::new();
+    f.write("one_%/a.bin", b"a");
+    f.write("one_XX/b.bin", b"b");
+    f.scan();
+    let folder = f.root.join("one_%");
+    assert_eq!(
+        f.space
+            .files("all", "", 0, folder.to_str().unwrap(), "")
+            .unwrap()["total"],
+        1
+    );
+    assert!(f.space.folders(f.temp.path().to_str().unwrap(), 0).is_err());
+}
+#[test]
+fn quarantine_and_restore_never_overwrite_and_update_map() {
+    let f = Fixture::new();
+    let path = f.write("docs/a.txt", b"original");
+    f.scan();
+    let id = f.id("a.txt");
+    let scan = f.space.progress.lock().id;
+    let result = f.space.quarantine(&[id], scan).unwrap();
+    assert_eq!(result["done"], 1);
+    assert!(!path.exists());
+    assert_eq!(f.files()["total"], 0);
+    assert_eq!(f.space.progress.lock().bytes, 0);
+    let trash = f.space.trash().unwrap();
+    let tid = trash["files"][0]["id"].as_i64().unwrap();
+    fs::write(&path, b"replacement").unwrap();
+    assert_eq!(f.space.restore(&[tid]).unwrap()["done"], 0);
+    assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    fs::remove_file(&path).unwrap();
+    assert_eq!(f.space.restore(&[tid]).unwrap()["done"], 1);
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert!(
+        f.space.trash().unwrap()["files"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+#[test]
+fn changed_files_and_obsolete_scan_are_rejected() {
+    let f = Fixture::new();
+    let path = f.write("a.bin", b"before");
+    f.scan();
+    let id = f.id("a.bin");
+    let scan = f.space.progress.lock().id;
+    fs::write(&path, b"changed content").unwrap();
+    assert_eq!(f.space.quarantine(&[id], scan).unwrap()["done"], 0);
+    assert!(path.exists());
+    f.scan();
+    assert!(f.space.quarantine(&[id], scan).is_err());
+}
+#[test]
+fn crash_recovery_preserves_replacement_and_original_copy() {
+    let f = Fixture::new();
+    let path = f.write("a.bin", b"original");
+    f.scan();
+    let hash = photosort::analysis::fingerprint(&path).unwrap();
+    let root = f.space.progress.lock().root.clone();
+    let vault = Path::new(&root).join(".photosort-space-trash/copy.bin");
+    fs::create_dir_all(vault.parent().unwrap()).unwrap();
+    fs::copy(&path, &vault).unwrap();
+    f.db().execute("INSERT INTO trash(original,vault,root,size,hash,state,created) VALUES(?,?,?,?,?,'pending',1)",params![path.to_string_lossy(),vault.to_string_lossy(),root,8,hash]).unwrap();
+    fs::write(&path, b"replacement").unwrap();
+    f.space.recover().unwrap();
+    f.space.recover().unwrap();
+    assert_eq!(fs::read(&vault).unwrap(), b"original");
+    assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    assert_eq!(f.space.trash().unwrap()["files"][0]["state"], "pending");
+    fs::remove_file(&path).unwrap();
+    f.space.recover().unwrap();
+    assert_eq!(f.space.trash().unwrap()["files"][0]["state"], "stored");
+    assert_eq!(f.files()["total"], 0);
+}
+#[test]
+fn reopened_index_restores_interrupted_restore_journal() {
+    let f = Fixture::new();
+    let path = f.write("a.bin", b"original");
+    f.scan();
+    let id = f.id("a.bin");
+    let scan = f.space.progress.lock().id;
+    f.space.quarantine(&[id], scan).unwrap();
+    let (tid, vault): (i64, String) = f
+        .db()
+        .query_row("SELECT id,vault FROM trash", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    fs::copy(&vault, &path).unwrap();
+    f.db()
+        .execute("UPDATE trash SET state='restoring' WHERE id=?", [tid])
+        .unwrap();
+    f.space.close();
+    let reopened = Space::open(&f.data).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert!(!Path::new(&vault).exists());
+    assert!(
+        reopened.trash().unwrap()["files"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    reopened.close();
+}
+#[test]
+fn optimizer_rejects_arbitrary_command_arguments() {
+    for input in ["C: /D", "C:\\Windows", "C:;whoami", "\\\\server\\share", ""] {
+        assert!(photosort::space::optimize_drive(input, false).is_err());
+    }
+}
+
+#[test]
+fn elevation_quotes_spaces_and_trailing_backslashes() {
+    assert_eq!(
+        photosort::space::quote_windows_arg(r"C:\My Data"),
+        r#""C:\My Data""#
+    );
+    assert_eq!(photosort::space::quote_windows_arg(r"C:\"), r#""C:\\""#);
+    assert_eq!(photosort::space::quote_windows_arg("x\"y"), "\"x\\\"y\"");
+}
+
+#[test]
+fn map_paginates_all_immediate_folders() {
+    let f = Fixture::new();
+    for i in 0..105 {
+        f.write(&format!("folder-{i:03}/one.bin"), b"x");
+    }
+    f.scan();
+    let first = f.space.folders("", 0).unwrap();
+    let second = f.space.folders("", 100).unwrap();
+    assert_eq!(first["total"], 105);
+    assert_eq!(first["folders"].as_array().unwrap().len(), 100);
+    assert_eq!(second["folders"].as_array().unwrap().len(), 5);
+    assert_ne!(first["folders"][0]["path"], second["folders"][0]["path"]);
+}
+
+#[test]
+fn operating_system_and_recovery_files_are_never_cleanup_candidates() {
+    let f = Fixture::new();
+    let path = f.write("Recovery/boot-data.bin", b"critical");
+    f.write("NTUSER.DAT", b"profile");
+    f.scan();
+    let scan = f.space.progress.lock().id;
+    for name in ["boot-data.bin", "NTUSER.DAT"] {
+        let id = f.id(name);
+        assert_eq!(f.space.quarantine(&[id], scan).unwrap()["done"], 0);
+    }
+    assert!(path.exists());
+    assert_eq!(f.files()["total"], 2);
+}
+
+#[test]
+fn same_size_edit_within_one_second_is_rejected() {
+    let f = Fixture::new();
+    let path = f.write("precise.bin", b"before");
+    let time =
+        std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_millis(100);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(time))
+        .unwrap();
+    f.scan();
+    let scan = f.space.progress.lock().id;
+    let id = f.id("precise.bin");
+    fs::write(&path, b"after!").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(time + Duration::from_micros(100)))
+        .unwrap();
+    assert_eq!(f.space.quarantine(&[id], scan).unwrap()["done"], 0);
+    assert_eq!(fs::read(path).unwrap(), b"after!");
+}
+
+#[test]
+fn space_routes_preserve_media_and_share_persistent_theme() {
+    use std::io::{Read, Write};
+    let temp = tempfile::tempdir().unwrap();
+    let library = photosort::library::Library::open(temp.path()).unwrap();
+    let url = photosort::server::serve(library.clone(), 0).unwrap();
+    let host = url.trim_start_matches("http://");
+    let request = |path: &str, body: Option<&str>, token: &str| -> String {
+        let mut stream = std::net::TcpStream::connect(host).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let text = if let Some(body) = body {
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: {host}\r\nX-PhotoSort-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        } else {
+            format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+        };
+        stream.write_all(text.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let session = request("/api/session", None, "");
+    let json: serde_json::Value =
+        serde_json::from_str(session.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let token = json["token"].as_str().unwrap();
+    assert!(request("/", None, "").contains("space.js"));
+    assert!(request("/photos", None, "").contains("duplicates-dialog"));
+    assert!(request("/api/space/theme", Some(r#"{"theme":"dark"}"#), "").contains("403"));
+    assert!(
+        request("/api/space/theme", Some(r#"{"theme":"dark"}"#), token).starts_with("HTTP/1.1 200")
+    );
+    assert_eq!(library.settings().theme, "dark");
+    assert!(
+        request("/api/space/theme", Some(r#"{"theme":"invalid"}"#), token)
+            .starts_with("HTTP/1.1 400")
+    );
+    assert_eq!(library.settings().theme, "dark");
+    library.close();
+    thread::sleep(Duration::from_millis(250));
+}

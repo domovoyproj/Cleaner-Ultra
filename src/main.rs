@@ -35,8 +35,23 @@ fn run() -> Result<()> {
         .create(true)
         .truncate(false)
         .open(data.join("instance.lock"))?;
-    lock.try_lock_exclusive()
-        .context("Эта библиотека уже открыта в другом экземпляре PhotoSort")?;
+    if args.iter().any(|arg| arg == "--elevated-wait") {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match lock.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(error).context("Предыдущее окно ещё использует библиотеку");
+                    };
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+            }
+        }
+    } else {
+        lock.try_lock_exclusive()
+            .context("Эта библиотека уже открыта в другом экземпляре PhotoSort")?;
+    }
     let library = Library::open(&data)?;
     if let Some(root) = value("--scan") {
         library.start(&root, false)?;
@@ -72,6 +87,7 @@ fn run() -> Result<()> {
             Minimize,
             Maximize,
             Drag,
+            Elevate,
             Resize(ResizeDirection),
         }
         let event_loop = EventLoopBuilder::<WindowCommand>::with_user_event().build();
@@ -79,7 +95,7 @@ fn run() -> Result<()> {
             image::load_from_memory(include_bytes!("../packaging/photosort.ico"))?.into_rgba8();
         let (width, height) = icon.dimensions();
         let window = WindowBuilder::new()
-            .with_title("PhotoSort")
+            .with_title("PhotoSort Space")
             .with_decorations(false)
             .with_window_icon(Some(Icon::from_rgba(icon.into_raw(), width, height)?))
             .with_inner_size(LogicalSize::new(1440.0, 940.0))
@@ -103,6 +119,7 @@ fn run() -> Result<()> {
                     "minimize" => WindowCommand::Minimize,
                     "maximize" => WindowCommand::Maximize,
                     "drag" => WindowCommand::Drag,
+                    "elevate" => WindowCommand::Elevate,
                     "resize:n" => WindowCommand::Resize(ResizeDirection::North),
                     "resize:s" => WindowCommand::Resize(ResizeDirection::South),
                     "resize:e" => WindowCommand::Resize(ResizeDirection::East),
@@ -131,6 +148,21 @@ fn run() -> Result<()> {
                     *flow = ControlFlow::Exit;
                 }
                 Event::UserEvent(WindowCommand::Minimize) => window.set_minimized(true),
+                Event::UserEvent(WindowCommand::Elevate) => {
+                    match photosort::space::restart_elevated(&library.data) {
+                        Ok(()) => {
+                            library.close();
+                            *flow = ControlFlow::Exit;
+                        }
+                        Err(error) => {
+                            let _ = rfd::MessageDialog::new()
+                                .set_title("PhotoSort Space")
+                                .set_description(error.to_string())
+                                .set_level(rfd::MessageLevel::Info)
+                                .show();
+                        }
+                    }
+                }
                 Event::UserEvent(WindowCommand::Maximize) => {
                     window.set_maximized(!window.is_maximized());
                 }
