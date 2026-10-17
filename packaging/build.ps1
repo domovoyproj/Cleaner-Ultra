@@ -10,18 +10,18 @@ if (-not $Toolchain -and (Test-Path '.photosort\tools\mingw\mingw64\bin\gcc.exe'
     $env:PATH = (Join-Path (Get-Location).Path '.photosort\tools\mingw\mingw64\bin') + ';' + $env:PATH
 }
 if ($Toolchain) { $cargoArgs += ('+' + $Toolchain) }
+foreach ($script in @('app.js','space.js','face-worker.js','icons.js','map-layout.js')) {
+    & node --check (Join-Path 'photosort/web' $script)
+    if ($LASTEXITCODE -ne 0) { throw "Frontend validation failed: $script" }
+}
+& node --test tests/map-layout.cjs
+if ($LASTEXITCODE -ne 0) { throw 'Disk map layout tests failed' }
 & .\packaging\prepare-runtime.ps1
 & .\packaging\fetch-ffmpeg.ps1
 & cargo @cargoArgs test --release --locked
 if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
 & cargo @cargoArgs test --release --locked video_ -- --ignored
 if ($LASTEXITCODE -ne 0) { throw 'Video integration tests failed' }
-node --check photosort/web/app.js
-if ($LASTEXITCODE -ne 0) { throw 'Frontend validation failed' }
-node --check photosort/web/space.js
-if ($LASTEXITCODE -ne 0) { throw 'Space frontend validation failed' }
-node --check photosort/web/face-worker.js
-if ($LASTEXITCODE -ne 0) { throw 'Face worker validation failed' }
 & cargo @cargoArgs build --release --locked
 if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
 if (-not $SkipAssets) { & .\packaging\fetch-assets.ps1 }

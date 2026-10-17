@@ -3,8 +3,8 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 const names = {overview:"Обзор",map:"Карта диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Оптимизация дисков",trash:"Корзина"};
 const categories = {photos:"Изображения",video:"Видео",audio:"Аудио",archives:"Архивы и образы",documents:"Документы",apps:"Приложения",other:"Другое"};
 const headings = {
-  overview:["ПРОСТРАНСТВО ДЛЯ ВАЖНОГО","Каждый гигабайт<br>на своём месте<span>.</span>","Узнайте, что занимает диск. Оставьте только нужное."],
-  map:["УВИДЕТЬ БОЛЬШЕ","Всё пространство.<br>В одной картине<span>.</span>","От большого к малому. Откройте папку, чтобы заглянуть глубже."],
+  overview:["ПРОСТРАНСТВО ДЛЯ ВАЖНОГО","Место под вашим<br>контролем<span>.</span>","Узнайте, что занимает диск. Оставьте только нужное."],
+  map:["УВИДЕТЬ БОЛЬШЕ","Карта пространства<span>.</span>","Увидеть объём. Найти лишнее. Сохранить важное."],
   large:["ВЕСОМЫЕ ПРИЧИНЫ ДЛЯ ПОРЯДКА","Большие файлы.<br>Большие возможности<span>.</span>","Самое объёмное — в начале списка. Каждый файл под вашим контролем."],
   cleanup:["ОСТАВИТЬ НУЖНОЕ","Свободнее диск.<br>Легче работать<span>.</span>","Проверьте кандидатов и выберите подходящий способ очистки."],
   optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Дефрагментация HDD и подходящая оптимизация SSD средствами Windows."],
@@ -60,7 +60,7 @@ async function refresh() {
   if(previous!==state.scan){state.selected.clear();state.offset=0;state.mapPath="";state.mapOffset=0;state.folder="";}
   if(!state.drive||!info.drives.some(d=>d.path===state.drive))state.drive=info.drives[0]?.path;
   $("#drives").replaceChildren(...info.drives.map(d=>{
-    const b=node("button","drive-tab");b.dataset.drive=d.path;b.append(node("span","","▱"),node("span","",`Диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно`));b.onclick=()=>{state.drive=d.path;renderDrive();};return b;
+    const b=node("button","drive-tab");b.dataset.drive=d.path;b.append(window.PhotoSortIcons.create("drive"),node("span","",`Диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно`));b.onclick=()=>{state.drive=d.path;renderDrive();};return b;
   }));
   renderDrive();progress(info.progress);
   $("#admin-button").disabled=info.administrator||!desktop||state.running;
@@ -93,7 +93,7 @@ function renderCategories(values) {
   if(!values.length)$("#category-bars").append(empty("Категории появятся после анализа."));
 }
 async function go(page,options={}) {
-  if(!names[page])return;state.page=page;
+  if(!names[page])return;state.page=page;document.body.classList.toggle("view-map",page==="map");if(page!=="map")document.body.classList.remove("map-focus");
   if(page==="large"&&!options.preserve){state.mode="large";state.folder="";state.offset=0;state.selected.clear();state.search="";$("#file-search").value="";}
   $$("[data-section]").forEach(s=>s.hidden=s.dataset.section!==page);
   $$("nav [data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
@@ -147,29 +147,75 @@ $("#confirm-move").onclick=()=>action(async()=>{
   $("#confirm-move").disabled=true;
   try{toast("Проверяем содержимое и переносим файлы. Это может занять время…");const r=await api("/api/space/trash",{ids:[...state.selected.keys()],scan:state.scan});$("#confirm-dialog").close();state.selected.clear();await refresh();toast(`Перемещено: ${num(r.done)}.${r.errors.length?" Ошибок: "+num(r.errors.length)+". "+r.errors[0].message:" Файлы можно восстановить в корзине PhotoSort."}`);}finally{$("#confirm-move").disabled=false;}
 });
+const mapView={data:null,selected:null,zoom:1,x:0,y:0,drag:null,moved:false};
+const mapIcon=f=>f.kind==="folder"?"folder":({video:"video",photos:"image",audio:"audio",archives:"archive"}[f.category]||"file");
+const svg=name=>window.PhotoSortIcons.create(name);
+async function openMap(path) {state.mapPath=path;state.mapOffset=0;mapView.selected=null;fitMap();await loadMap();}
 async function loadMap() {
-  const request=++state.mapRequest;const d=await api(`/api/space/folders?${new URLSearchParams({path:state.mapPath,offset:state.mapOffset})}`);if(request!==state.mapRequest)return;
-  state.mapPath=d.path||"";$("#map-path").textContent=d.path||"Сначала запустите анализ";$("#map-up").disabled=!d.parent;$("#map-up").onclick=()=>action(async()=>{state.mapPath=d.parent||"";state.mapOffset=0;await loadMap();});
-  $("#folder-list").replaceChildren(...d.folders.map(f=>{const b=node("button","folder-row");b.append(node("span","","▱"),node("strong","",basename(f.path)),node("small","",`Файлов: ${num(f.files)}`),node("span","",bytes(f.bytes)));b.onclick=()=>action(async()=>{state.mapPath=f.path;state.mapOffset=0;await loadMap();});return b;}));
-  renderTreemap(d.folders.slice(0,24));
-  $("#folder-total").textContent=`Папок: ${num(d.total)} · показано ${num(d.folders.length)}`;
-  $("#map-caption").textContent=`Крупнейших папок на карте: ${Math.min(24,d.folders.length)}`;
-  $("#folder-previous").disabled=state.mapOffset===0;$("#folder-next").disabled=state.mapOffset+100>=d.total;
-  $("#map-files").disabled=!state.scan;
+  const request=++state.mapRequest;
+  const d=await api(`/api/space/map?${new URLSearchParams({path:state.mapPath,offset:state.mapOffset})}`);if(request!==state.mapRequest)return;
+  if(mapView.data?.path!==d.path){mapView.selected=null;fitMap();}
+  mapView.data=d;state.mapPath=d.path||"";state.mapOffset=d.offset;
+  $("#map-crumbs").replaceChildren(...d.crumbs.flatMap((path,i)=>{const b=node("button",i===d.crumbs.length-1?"current":"",i===0?(basename(path)||path):basename(path));b.title=path;b.onclick=()=>action(()=>openMap(path));return i?[svg("chevron"),b]:[b];}));
+  if(!d.crumbs.length)$("#map-crumbs").append(node("span","","Сначала проанализируйте диск или папку"));
+  $("#map-size").textContent=bytes(d.bytes);$("#map-stats").textContent=`Файлов: ${num(d.files)} · элементов в папке: ${num(d.total)}`;
+  $("#map-up").disabled=!d.parent;$("#map-root").disabled=!d.parent;
+  $("#map-up").onclick=()=>action(()=>openMap(d.parent||""));$("#map-root").onclick=()=>action(()=>openMap(d.root));
+  const list=$("#folder-list");list.replaceChildren(...d.entries.map(f=>{
+    const r=node("div","map-row");r.dataset.path=f.path;
+    const b=node("button","map-row-select");b.setAttribute("aria-label",`Выбрать ${basename(f.path)}`);const copy=node("span","map-row-copy");copy.append(node("strong","",basename(f.path)),node("small","",f.kind==="folder"?`Папка · файлов: ${num(f.files)}`:categories[f.category]||"Файл"));b.append(svg(mapIcon(f)),copy);b.onclick=()=>selectMap(f);b.ondblclick=()=>f.kind==="folder"&&action(()=>openMap(f.path));
+    const share=node("div","map-share"),bar=node("i");bar.style.width=`${d.bytes?f.bytes/d.bytes*100:0}%`;share.append(bar,node("span","",percent(f.bytes,d.bytes)));
+    const open=node("button","icon-button");open.title=f.kind==="folder"?"Открыть папку":"Показать в Проводнике";open.setAttribute("aria-label",`${open.title}: ${basename(f.path)}`);open.append(svg(f.kind==="folder"?"chevron":"arrow"));open.onclick=()=>action(()=>f.kind==="folder"?openMap(f.path):api("/api/space/reveal",{id:f.id}));
+    r.append(b,share,node("strong","map-row-size",bytes(f.bytes)),open);return r;
+  }));
+  if(!d.entries.length)list.append(empty(state.scan?"В этой папке нет файлов в текущем снимке анализа.":"Сначала выберите папку или диск для анализа."));
+  $("#folder-total").textContent=`Элементов: ${num(d.total)} · по размеру`;
+  $("#map-list-range").textContent=d.total?`${num(d.offset+1)}–${num(Math.min(d.total,d.offset+60))} из ${num(d.total)}`:"Нет элементов";
+  $("#map-list-page").textContent=String(Math.floor(d.offset/60)+1).padStart(2,"0");
+  $("#folder-previous").disabled=d.offset===0;$("#folder-next").disabled=d.offset+60>=d.total;$("#map-files").disabled=!state.scan;
+  $("#map-caption").textContent=d.remainder.count?`На карте: 120 крупнейших + остальные ${num(d.remainder.count)}`:"Площадь блока соответствует размеру";
+  renderTreemap();renderInspector();
 }
-function renderTreemap(folders) {
-  const map=$("#treemap");map.replaceChildren();
-  const values=folders.filter(f=>f.bytes>0);if(!values.length){map.append(empty(state.scan?"В этой папке нет вложенных папок с файлами.<br>Откройте список файлов этой папки.":"Здесь появится карта папок после анализа."));return;}
-  const total=values.reduce((n,f)=>n+f.bytes,0);const width=map.clientWidth||800,height=map.clientHeight||370;
-  function layout(items,x,y,w,h){if(!items.length)return;if(items.length===1){const f=items[0];const b=node("button","map-block");Object.assign(b.style,{left:`${x/width*100}%`,top:`${y/height*100}%`,width:`${w/width*100}%`,height:`${h/height*100}%`,background:["#2b2b2b","#454545","#676767","#868686","#373737","#5a5a5a"][values.indexOf(f)%6]});b.append(node("strong","",basename(f.path)),node("small","",bytes(f.bytes)));b.title=`${f.path} · ${bytes(f.bytes)}`;b.onclick=()=>action(async()=>{state.mapPath=f.path;state.mapOffset=0;await loadMap();});map.append(b);return;}
-    const sum=items.reduce((n,f)=>n+f.bytes,0);let left=0,split=0;while(split<items.length-1&&left<sum/2){left+=items[split].bytes;split++;}const ratio=left/sum;
-    if(w>=h){layout(items.slice(0,split),x,y,w*ratio,h);layout(items.slice(split),x+w*ratio,y,w*(1-ratio),h);}else{layout(items.slice(0,split),x,y,w,h*ratio);layout(items.slice(split),x,y+h*ratio,w,h*(1-ratio));}}
-  if(total)layout(values,0,0,width,height);
+function percent(value,total){return total?`${(value/total*100).toLocaleString("ru-RU",{maximumFractionDigits:1})}%`:"0%";}
+function selectMap(f){mapView.selected=f;renderInspector();highlightMap();}
+function highlightMap(){for(const el of $$(".map-block,.map-row"))el.classList.toggle("selected",el.dataset.path===mapView.selected?.path);}
+function renderInspector(){
+  const box=$("#map-inspector"),f=mapView.selected,d=mapView.data;box.replaceChildren();
+  if(!f){const mark=node("span","inspector-mark");mark.append(svg("cursor"));box.append(mark,node("p","eyebrow","ВЫБЕРИТЕ ЭЛЕМЕНТ"),node("h2","","Что занимает место?"),node("p","","Нажмите на блок или строку списка. Здесь появятся размер, расположение и действия."));const hint=node("div","inspector-hint");hint.append(svg("folder"),node("span","","Двойной щелчок по папке открывает её содержимое."));box.append(hint);return;}
+  const mark=node("span","inspector-mark");mark.append(svg(f.remainder?"grid":mapIcon(f)));box.append(mark,node("p","eyebrow",f.remainder?"ОСТАЛЬНЫЕ ЭЛЕМЕНТЫ":f.kind==="folder"?"ПАПКА":"ФАЙЛ"),node("h2","",f.remainder?"Мелкие элементы":basename(f.path)),node("strong","inspector-size",bytes(f.bytes)));
+  const details=node("dl","inspector-details");for(const [label,value] of [["Доля папки",percent(f.bytes,d.bytes)],[f.remainder?"Элементов":"Файлов",num(f.files)]])details.append(node("dt","",label),node("dd","",value));box.append(details);
+  if(f.remainder){box.append(node("p","","Объединены, чтобы сохранить точные пропорции карты. Каждый элемент доступен в списке ниже."));const b=node("button","button secondary","Показать в списке");b.onclick=()=>action(async()=>{document.body.classList.remove("map-focus");$("#map-focus").setAttribute("aria-label","Развернуть карту");state.mapOffset=120;await loadMap();$("#folder-list").scrollIntoView({behavior:"smooth",block:"start"});});box.append(b);return;}
+  box.append(node("p","inspector-path",f.path));if(f.protected)box.append(node("p","protected-note","Системный или служебный файл. Очистка защищена."));
+  const b=node("button","button primary",f.kind==="folder"?"Открыть папку":"Показать в Проводнике");b.prepend(svg(f.kind==="folder"?"folder":"arrow"));b.onclick=()=>action(()=>f.kind==="folder"?openMap(f.path):api("/api/space/reveal",{id:f.id}));box.append(b);
 }
-$("#map-files").onclick=()=>action(async()=>{state.folder=state.mapPath;state.mode="all";state.offset=0;state.selected.clear();await go("large",{preserve:true});});
-$("#folder-previous").onclick=()=>action(async()=>{state.mapOffset=Math.max(0,state.mapOffset-100);await loadMap();});
-$("#folder-next").onclick=()=>action(async()=>{state.mapOffset+=100;await loadMap();});
-window.addEventListener("resize",()=>{if(state.page==="map")action(loadMap);});
+function renderTreemap(){
+  const map=$("#treemap"),d=mapView.data;map.replaceChildren();if(!d)return;
+  const values=[...d.tiles];if(d.remainder.bytes>0)values.push({path:"__remainder__",bytes:d.remainder.bytes,files:d.remainder.count,remainder:true});
+  const viewport=$("#map-viewport"),w=viewport.clientWidth*mapView.zoom,h=viewport.clientHeight*mapView.zoom;
+  const tiles=window.PhotoSortMap.layout(values,w,h);
+  if(!tiles.length){map.append(empty(state.scan?"В этой папке нет данных для карты. Откройте другую папку или обновите анализ.":"Карта появится после анализа. Нажмите «Анализировать диск» или выберите папку."));return;}
+  tiles.forEach((f,i)=>{const b=node("button",`map-block ${f.kind==="folder"?"folder-block":"file-block"}${f.remainder?" remainder-block":""}`);b.dataset.path=f.path;
+    Object.assign(b.style,{left:`${f.x/w*100}%`,top:`${f.y/h*100}%`,width:`${f.w/w*100}%`,height:`${f.h/h*100}%`,"--tile-tone":String(i%4)});
+    const label=f.remainder?`Остальные ${num(f.files)} элементов`:basename(f.path);b.title=`${f.remainder?label:f.path} · ${bytes(f.bytes)} · ${percent(f.bytes,d.bytes)}`;b.setAttribute("aria-label",b.title);
+    if(f.w>=85&&f.h>=50){const top=node("span","map-block-top");top.append(svg(f.remainder?"grid":mapIcon(f)),node("span","",percent(f.bytes,d.bytes)));b.append(top,node("strong","",label));if(f.h>=75)b.append(node("small","",bytes(f.bytes)));}else b.classList.add("micro-block");
+    b.onclick=()=>{if(!mapView.moved)selectMap(f);};b.ondblclick=()=>f.kind==="folder"&&action(()=>openMap(f.path));map.append(b);
+  });highlightMap();applyMapTransform();
+}
+function applyMapTransform(){const v=$("#map-viewport"),z=mapView.zoom;mapView.x=Math.min(0,Math.max(v.clientWidth*(1-z),mapView.x));mapView.y=Math.min(0,Math.max(v.clientHeight*(1-z),mapView.y));Object.assign($("#treemap").style,{transform:`translate(${mapView.x}px,${mapView.y}px)`,width:`${z*100}%`,height:`${z*100}%`});$("#map-zoom-value").textContent=`${Math.round(z*100)}%`;$("#map-zoom-out").disabled=z<=1;$("#map-zoom-in").disabled=z>=4;v.classList.toggle("zoomed",z>1);}
+function zoomMap(delta){const v=$("#map-viewport"),old=mapView.zoom,next=Math.min(4,Math.max(1,old+delta));mapView.x=(mapView.x-v.clientWidth/2)*next/old+v.clientWidth/2;mapView.y=(mapView.y-v.clientHeight/2)*next/old+v.clientHeight/2;mapView.zoom=next;applyMapTransform();renderTreemap();}
+function fitMap(){mapView.zoom=1;mapView.x=0;mapView.y=0;applyMapTransform();renderTreemap();}
+$("#map-zoom-in").onclick=()=>zoomMap(.5);$("#map-zoom-out").onclick=()=>zoomMap(-.5);$("#map-fit").onclick=fitMap;
+$("#map-focus").onclick=()=>{const on=document.body.classList.toggle("map-focus");$("#map-focus").setAttribute("aria-label",on?"Свернуть карту":"Развернуть карту");$("#map-focus").title=on?"Свернуть карту":"Развернуть карту";requestAnimationFrame(()=>{fitMap();renderTreemap();});};
+window.addEventListener("keydown",e=>{if(e.key==="Escape"&&document.body.classList.contains("map-focus")){$("#map-focus").click();}});
+const viewport=$("#map-viewport");
+viewport.addEventListener("pointerdown",e=>{mapView.moved=false;if(mapView.zoom<=1||e.button!==0||e.target.closest(".map-zoom"))return;mapView.drag={id:e.pointerId,startX:e.clientX,startY:e.clientY,x:mapView.x,y:mapView.y};});
+viewport.addEventListener("pointermove",e=>{const drag=mapView.drag;if(!drag)return;const dx=e.clientX-drag.startX,dy=e.clientY-drag.startY;if(Math.abs(dx)+Math.abs(dy)>5){mapView.moved=true;viewport.setPointerCapture(e.pointerId);}if(mapView.moved){mapView.x=drag.x+dx;mapView.y=drag.y+dy;applyMapTransform();}});
+const stopDrag=()=>{mapView.drag=null;setTimeout(()=>{mapView.moved=false;},0);};viewport.addEventListener("pointerup",stopDrag);viewport.addEventListener("pointercancel",stopDrag);
+viewport.addEventListener("wheel",e=>{if(!e.ctrlKey)return;e.preventDefault();zoomMap(e.deltaY<0?.5:-.5);},{passive:false});
+$("#map-files").onclick=()=>action(async()=>{state.folder=state.mapPath;state.mode="all";state.offset=0;state.search="";state.category="";$("#file-search").value="";$("#file-category").value="";state.selected.clear();await go("large",{preserve:true});});
+$("#folder-previous").onclick=()=>action(async()=>{state.mapOffset=Math.max(0,state.mapOffset-60);await loadMap();});
+$("#folder-next").onclick=()=>action(async()=>{state.mapOffset+=60;await loadMap();});
+new ResizeObserver(()=>{if(state.page==="map"){applyMapTransform();renderTreemap();}}).observe(viewport);
 async function loadTrash() {
   const d=await api(`/api/space/trash?offset=${state.trashOffset}`);state.trashOffset=d.offset;
   $("#trash-total").textContent=`Файлов: ${num(d.total)}`;$("#trash-page").textContent=String(Math.floor(d.offset/d.page_size)+1).padStart(2,"0");

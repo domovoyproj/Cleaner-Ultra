@@ -340,6 +340,12 @@ fn space_routes_preserve_media_and_share_persistent_theme() {
         serde_json::from_str(session.split("\r\n\r\n").nth(1).unwrap()).unwrap();
     let token = json["token"].as_str().unwrap();
     assert!(request("/", None, "").contains("space.js"));
+    for asset in ["/icons.js", "/map-layout.js", "/space-refined.css"] {
+        assert!(
+            request(asset, None, "").starts_with("HTTP/1.1 200"),
+            "Missing UI asset: {asset}"
+        );
+    }
     assert!(request("/photos", None, "").contains("duplicates-dialog"));
     assert!(request("/api/space/theme", Some(r#"{"theme":"dark"}"#), "").contains("403"));
     assert!(
@@ -377,4 +383,73 @@ fn trash_pagination_keeps_older_entries_accessible() {
     let adjusted = f.space.trash(600).unwrap();
     assert_eq!(adjusted["offset"], 540);
     assert_eq!(adjusted["files"].as_array().unwrap().len(), 60);
+}
+
+#[test]
+fn map_includes_direct_files_and_keeps_exact_remainder_proportions() {
+    let f = Fixture::new();
+    f.write("loose.bin", &[1; 50]);
+    for i in 0..131 {
+        f.write(&format!("folder-{i:03}/one.bin"), b"x");
+    }
+    f.scan();
+    let map = f.space.map("", 0).unwrap();
+    assert_eq!(map["total"], 132);
+    assert_eq!(map["bytes"], 181);
+    assert_eq!(map["files"], 132);
+    assert_eq!(map["entries"][0]["kind"], "file");
+    assert_eq!(map["entries"][0]["bytes"], 50);
+    let shown: u64 = map["tiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(shown + map["remainder"]["bytes"].as_u64().unwrap(), 181);
+    assert_eq!(map["remainder"]["count"], 12);
+    assert_eq!(
+        f.space.map("", 120).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        12
+    );
+    let folder = f.root.join("folder-000");
+    let child = f.space.map(folder.to_str().unwrap(), 0).unwrap();
+    assert_eq!(child["entries"][0]["kind"], "file");
+    assert_eq!(child["crumbs"].as_array().unwrap().len(), 2);
+    assert_eq!(child["bytes"], 1);
+    assert!(
+        f.space
+            .map(f.root.join("../index").to_str().unwrap(), 0)
+            .is_err()
+    );
+}
+
+#[test]
+fn map_migrates_v06_parent_index_without_rescanning_or_losing_trash() {
+    let f = Fixture::new();
+    f.write("docs/a.bin", b"content");
+    f.write("docs/b.bin", b"recoverable");
+    f.scan();
+    let scan = f.space.progress.lock().id;
+    f.space.quarantine(&[f.id("b.bin")], scan).unwrap();
+    let stored_id = f.space.trash(0).unwrap()["files"][0]["id"]
+        .as_i64()
+        .unwrap();
+    f.space.close();
+    let db = f.db();
+    db.execute_batch("DROP INDEX space_file_parent; ALTER TABLE files DROP COLUMN parent;")
+        .unwrap();
+    drop(db);
+    let reopened = Space::open(&f.data).unwrap();
+    let map = reopened
+        .map(f.root.join("docs").to_str().unwrap(), 0)
+        .unwrap();
+    assert_eq!(map["entries"][0]["bytes"], 7);
+    assert_eq!(map["files"], 1);
+    assert_eq!(reopened.trash(0).unwrap()["files"][0]["id"], stored_id);
+    assert_eq!(reopened.restore(&[stored_id]).unwrap()["done"], 1);
+    assert_eq!(fs::read(f.root.join("docs/b.bin")).unwrap(), b"recoverable");
+    reopened.close();
 }

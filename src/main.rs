@@ -94,12 +94,25 @@ fn run() -> Result<()> {
         let icon =
             image::load_from_memory(include_bytes!("../packaging/photosort.ico"))?.into_rgba8();
         let (width, height) = icon.dimensions();
+        let (screen_width, screen_height) = event_loop
+            .primary_monitor()
+            .map(|monitor| {
+                let size = monitor.size();
+                let scale = monitor.scale_factor();
+                (size.width as f64 / scale, size.height as f64 / scale)
+            })
+            .unwrap_or((1600.0, 1040.0));
+        let initial_width = 1440.0_f64.min((screen_width - 64.0).max(320.0));
+        let initial_height = 940.0_f64.min((screen_height - 96.0).max(320.0));
         let window = WindowBuilder::new()
             .with_title("PhotoSort Space")
             .with_decorations(false)
             .with_window_icon(Some(Icon::from_rgba(icon.into_raw(), width, height)?))
-            .with_inner_size(LogicalSize::new(1440.0, 940.0))
-            .with_min_inner_size(LogicalSize::new(860.0, 640.0))
+            .with_inner_size(LogicalSize::new(initial_width, initial_height))
+            .with_min_inner_size(LogicalSize::new(
+                860.0_f64.min(initial_width),
+                640.0_f64.min(initial_height),
+            ))
             .build(&event_loop)?;
         let origin = url.clone();
         let ipc_origin = url.clone();

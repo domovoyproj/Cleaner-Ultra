@@ -124,22 +124,54 @@ impl Space {
         db.busy_timeout(std::time::Duration::from_secs(30))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
           CREATE TABLE IF NOT EXISTS scans(id INTEGER PRIMARY KEY,root TEXT,state TEXT,started INTEGER,files INTEGER DEFAULT 0,bytes INTEGER DEFAULT 0,errors INTEGER DEFAULT 0);
-          CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY,scan INTEGER,path TEXT,name TEXT,size INTEGER,modified INTEGER,category TEXT,temporary INTEGER,protected INTEGER,stamp INTEGER DEFAULT 0, UNIQUE(scan,path));
+          CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY,scan INTEGER,path TEXT,name TEXT,size INTEGER,modified INTEGER,category TEXT,temporary INTEGER,protected INTEGER,stamp INTEGER DEFAULT 0,parent TEXT DEFAULT '', UNIQUE(scan,path));
           CREATE INDEX IF NOT EXISTS space_size ON files(scan,size DESC,id);
           CREATE INDEX IF NOT EXISTS space_category ON files(scan,category,size DESC);
           CREATE TABLE IF NOT EXISTS folders(scan INTEGER,path TEXT,parent TEXT,bytes INTEGER,files INTEGER,PRIMARY KEY(scan,path));
           CREATE INDEX IF NOT EXISTS space_parent ON folders(scan,parent,bytes DESC);
           CREATE TABLE IF NOT EXISTS trash(id INTEGER PRIMARY KEY,original TEXT,vault TEXT,root TEXT,size INTEGER,hash TEXT,state TEXT,created INTEGER);
           UPDATE scans SET state='interrupted' WHERE state='running';")?;
-        let has_stamp: bool = db
+        let columns = db
             .prepare("PRAGMA table_info(files)")?
             .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .iter()
-            .any(|name| name == "stamp");
-        if !has_stamp {
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|name| name == "stamp") {
             db.execute("ALTER TABLE files ADD COLUMN stamp INTEGER DEFAULT 0", [])?;
         }
+        if !columns.iter().any(|name| name == "parent") {
+            db.execute("ALTER TABLE files ADD COLUMN parent TEXT DEFAULT ''", [])?;
+        }
+        // Batches also resume an interrupted upgrade of a large existing index.
+        let mut migrated = 0i64;
+        loop {
+            let records = db
+                .prepare(
+                    "SELECT id,path FROM files WHERE parent='' AND id>? ORDER BY id LIMIT 512",
+                )?
+                .query_map([migrated], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if records.is_empty() {
+                break;
+            }
+            let tx = db.unchecked_transaction()?;
+            for (id, path) in records {
+                let parent = Path::new(&path)
+                    .parent()
+                    .context("Некорректный путь в индексе")?;
+                tx.execute(
+                    "UPDATE files SET parent=? WHERE id=?",
+                    params![parent.to_string_lossy(), id],
+                )?;
+                migrated = id;
+            }
+            tx.commit()?;
+        }
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS space_file_parent ON files(scan,parent,size DESC,id)",
+            [],
+        )?;
         let progress = db.query_row("SELECT id,root,state,files,bytes,errors,started FROM scans ORDER BY id DESC LIMIT 1", [], |r| Ok(ScanProgress {id:r.get(0)?,root:r.get(1)?,state:r.get(2)?,files:r.get(3)?,bytes:r.get(4)?,errors:r.get(5)?,started:r.get(6)?,current:String::new()})).optional()?.unwrap_or_default();
         let mut protected_roots: Vec<String> = [
             "SystemRoot",
@@ -363,7 +395,7 @@ impl Space {
         let tx = db.transaction()?;
         let mut folders = std::collections::HashMap::<PathBuf, (u64, u64)>::new();
         for (path, size, modified, temp) in batch {
-            tx.execute("INSERT OR REPLACE INTO files(scan,path,name,size,modified,category,temporary,protected,stamp) VALUES(?,?,?,?,?,?,?,?,?)",params![id,path.to_string_lossy(),path.file_name().unwrap_or_default().to_string_lossy().to_lowercase(),size,modified/1_000_000_000,category(path),temp,self.protected(path),modified])?;
+            tx.execute("INSERT OR REPLACE INTO files(scan,path,name,size,modified,category,temporary,protected,stamp,parent) VALUES(?,?,?,?,?,?,?,?,?,?)",params![id,path.to_string_lossy(),path.file_name().unwrap_or_default().to_string_lossy().to_lowercase(),size,modified/1_000_000_000,category(path),temp,self.protected(path),modified,path.parent().unwrap_or(root).to_string_lossy()])?;
             for parent in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
                 let f = folders.entry(parent.to_path_buf()).or_default();
                 f.0 = f.0.saturating_add(*size);
@@ -467,6 +499,57 @@ impl Space {
         children.truncate(100);
         Ok(
             json!({"path":folder,"root":root,"parent":if folder==root{None}else{folder.parent()},"folders":children,"total":total,"offset":offset.max(0)}),
+        )
+    }
+    pub fn map(&self, path: &str, offset: i64) -> Result<Value> {
+        let p = self.progress.lock().clone();
+        if p.id == 0 {
+            return Ok(
+                json!({"path":"","root":"","parent":null,"crumbs":[],"entries":[],"tiles":[],"total":0,"bytes":0,"files":0,"offset":0,"remainder":{"bytes":0,"count":0}}),
+            );
+        }
+        let root = PathBuf::from(&p.root);
+        let folder = if path.is_empty() {
+            root.clone()
+        } else {
+            PathBuf::from(path)
+        };
+        if !folder.starts_with(&root)
+            || folder
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            bail!("Папка вне текущего анализа")
+        }
+        let db = self.db.lock();
+        let items = "SELECT path,bytes,files,'folder' AS kind,0 AS id,'folder' AS category,0 AS protected FROM folders WHERE scan=?1 AND parent=?2 UNION ALL SELECT path,size AS bytes,1 AS files,'file' AS kind,id,category,protected FROM files WHERE scan=?1 AND parent=?2";
+        let (total, bytes, files): (u64, u64, u64) = db.query_row(
+            &format!(
+                "SELECT COUNT(*),COALESCE(SUM(bytes),0),COALESCE(SUM(files),0) FROM ({items})"
+            ),
+            params![p.id, folder.to_string_lossy()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let offset = if total == 0 {
+            0
+        } else {
+            offset.max(0).min(((total - 1) / 60 * 60) as i64)
+        };
+        let query = |limit: i64, offset: i64| -> Result<Vec<Value>> {
+            Ok(db.prepare(&format!("SELECT * FROM ({items}) ORDER BY bytes DESC,path LIMIT ?3 OFFSET ?4"))?
+                .query_map(params![p.id,folder.to_string_lossy(),limit,offset],|r|Ok(json!({"path":r.get::<_,String>(0)?,"bytes":r.get::<_,u64>(1)?,"files":r.get::<_,u64>(2)?,"kind":r.get::<_,String>(3)?,"id":r.get::<_,i64>(4)?,"category":r.get::<_,String>(5)?,"protected":r.get::<_,bool>(6)?})))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+        let tiles = query(120, 0)?;
+        let shown: u64 = tiles.iter().map(|v| v["bytes"].as_u64().unwrap_or(0)).sum();
+        let mut crumbs: Vec<_> = folder
+            .ancestors()
+            .take_while(|v| v.starts_with(&root))
+            .map(|v| v.to_string_lossy().to_string())
+            .collect();
+        crumbs.reverse();
+        Ok(
+            json!({"path":folder,"root":root,"parent":if folder==root{None}else{folder.parent()},"crumbs":crumbs,"entries":query(60,offset)?,"tiles":tiles,"total":total,"bytes":bytes,"files":files,"offset":offset,"remainder":{"bytes":bytes.saturating_sub(shown),"count":total.saturating_sub(120)}}),
         )
     }
     fn file(&self, id: i64) -> Result<SpaceFile> {

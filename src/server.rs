@@ -272,6 +272,9 @@ fn route(
             "/api/space/folders" => {
                 space.folders(&get("path", ""), get("offset", "0").parse().unwrap_or(0))?
             }
+            "/api/space/map" => {
+                space.map(&get("path", ""), get("offset", "0").parse().unwrap_or(0))?
+            }
             "/api/space/trash" => space.trash(get("offset", "0").parse().unwrap_or(0))?,
             "/api/session" => {
                 json!({"token":token,"version":env!("CARGO_PKG_VERSION"),"engine":"Rust"})
@@ -304,6 +307,24 @@ fn route(
             "/space.js" => {
                 return Ok((
                     include_bytes!("../photosort/web/space.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/icons.js" => {
+                return Ok((
+                    include_bytes!("../photosort/web/icons.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/space-refined.css" => {
+                return Ok((
+                    include_bytes!("../photosort/web/space-refined.css").to_vec(),
+                    "text/css; charset=utf-8".into(),
+                ));
+            }
+            "/map-layout.js" => {
+                return Ok((
+                    include_bytes!("../photosort/web/map-layout.js").to_vec(),
                     "text/javascript; charset=utf-8".into(),
                 ));
             }
