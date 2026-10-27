@@ -1,4 +1,4 @@
-use photosort::{
+use cleaner_ultra::{
     analysis::{self, BKTree, HammingIndex},
     library::Library,
 };
@@ -75,7 +75,7 @@ impl Fixture {
     fn movie(&self, name: &str, seconds: u32) -> PathBuf {
         let path = self.root.join(name);
         let result = std::process::Command::new(
-            photosort::video::tool("ffmpeg")
+            cleaner_ultra::video::tool("ffmpeg")
                 .expect("Run packaging/fetch-ffmpeg.ps1 before video tests"),
         )
         .args([
@@ -126,7 +126,7 @@ impl Drop for Fixture {
 
 #[test]
 fn media_ranges_cover_seek_suffix_and_invalid_requests() {
-    use photosort::server::byte_range;
+    use cleaner_ultra::server::byte_range;
     assert_eq!(byte_range(None, 1000), Some((0, 1000, false)));
     assert_eq!(
         byte_range(Some("bytes=100-199"), 1000),
@@ -162,12 +162,12 @@ fn exclusive_copy_preserves_modified_time_and_conflicts() {
         .unwrap();
     let hash = analysis::fingerprint(&source).unwrap();
     let target = f.root.join("copy.jpg");
-    photosort::library::copy_exclusive(&source, &target, &hash).unwrap();
+    cleaner_ultra::library::copy_exclusive(&source, &target, &hash).unwrap();
     assert_eq!(
         fs::metadata(&source).unwrap().modified().unwrap(),
         fs::metadata(&target).unwrap().modified().unwrap()
     );
-    assert!(photosort::library::copy_exclusive(&source, &target, &hash).is_err());
+    assert!(cleaner_ultra::library::copy_exclusive(&source, &target, &hash).is_err());
     assert_eq!(analysis::fingerprint(&source).unwrap(), hash);
     assert_eq!(analysis::fingerprint(&target).unwrap(), hash);
 }
@@ -205,7 +205,7 @@ fn video_import_groups_export_trash_and_conflict_restore() {
     let source = f.movie("clip.MP4", 3);
     fs::copy(&source, f.root.join("duplicate.mp4")).unwrap();
     let recode = f.root.join("reencoded.avi");
-    let result = std::process::Command::new(photosort::video::tool("ffmpeg").unwrap())
+    let result = std::process::Command::new(cleaner_ultra::video::tool("ffmpeg").unwrap())
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(&source)
         .args(["-c:v", "mpeg4", "-q:v", "5", "-threads", "1", "-y"])
@@ -243,8 +243,8 @@ fn video_import_groups_export_trash_and_conflict_restore() {
         expected
     );
     assert_ne!(
-        photosort::library::asset_key(&source),
-        photosort::library::asset_key(&f.root.join("clip.jpg"))
+        cleaner_ultra::library::asset_key(&source),
+        cleaner_ultra::library::asset_key(&f.root.join("clip.jpg"))
     );
     assert_eq!(f.library.move_photos(&[id], false).unwrap().done, vec![id]);
     assert!(!source.exists());
@@ -306,7 +306,7 @@ fn video_compatible_preview_and_http_seek_do_not_modify_original() {
             .starts_with(&[0xff, 0xd8])
     );
     assert_eq!(f.library.photo(photo.id).unwrap().hash, photo.hash);
-    let url = photosort::server::serve(f.library.clone(), 0).unwrap();
+    let url = cleaner_ultra::server::serve(f.library.clone(), 0).unwrap();
     let host = url.trim_start_matches("http://");
     let route = format!("/video/{}", photo.id);
     let (head, body) = video_request(host, "GET", &route, Some("bytes=10-137"));
@@ -319,7 +319,8 @@ fn video_compatible_preview_and_http_seek_do_not_modify_original() {
     let (head, _) = video_request(host, "GET", &route, Some("bytes=999999999-"));
     assert!(head.starts_with("HTTP/1.1 416"));
     let preview = f.library.video_source(photo.id, true).unwrap();
-    let metadata = photosort::video::metadata(&preview, &f.library.data.join("scratch")).unwrap();
+    let metadata =
+        cleaner_ultra::video::metadata(&preview, &f.library.data.join("scratch")).unwrap();
     assert_eq!(metadata.codec, "vp8");
     assert!((metadata.duration - photo.duration).abs() < 0.25);
     assert!(metadata.width <= 1280);
@@ -410,8 +411,13 @@ fn video_corrupt_input_and_pause_resume_preserve_index() {
     );
     let destination = f.library.data.join("cancelled.webm");
     assert!(
-        photosort::video::transcode(&f.root.join("clip.mp4"), &destination, 1024 * 1024, || true)
-            .is_err()
+        cleaner_ultra::video::transcode(
+            &f.root.join("clip.mp4"),
+            &destination,
+            1024 * 1024,
+            || true
+        )
+        .is_err()
     );
     assert!(f.root.join("clip.mp4").exists());
 }
@@ -433,10 +439,14 @@ fn video_slow_streams_leave_control_api_responsive() {
     f.db()
         .execute(
             "UPDATE photos SET size=?,mtime=? WHERE id=?",
-            params![meta.len() as i64, photosort::library::modified(&meta), id],
+            params![
+                meta.len() as i64,
+                cleaner_ultra::library::modified(&meta),
+                id
+            ],
         )
         .unwrap();
-    let url = photosort::server::serve(f.library.clone(), 0).unwrap();
+    let url = cleaner_ultra::server::serve(f.library.clone(), 0).unwrap();
     let host = url.trim_start_matches("http://");
     let mut clients = Vec::new();
     for _ in 0..6 {
@@ -865,7 +875,7 @@ fn crash_recovery_preserves_source_or_target() {
     let source = f.image("one.jpg", 0);
     f.scan();
     let id = f.photos("all")[0]["id"].as_i64().unwrap();
-    let trash = f.root.join(".photosort-trash/recover.jpg");
+    let trash = f.root.join(".cleaner_ultra-trash/recover.jpg");
     fs::create_dir_all(trash.parent().unwrap()).unwrap();
     f.db()
         .execute(
@@ -903,7 +913,7 @@ fn recovery_preserves_valid_copy_when_source_was_replaced() {
         .library
         .photo(f.photos("all")[0]["id"].as_i64().unwrap())
         .unwrap();
-    let target = f.root.join(".photosort-trash/recover.jpg");
+    let target = f.root.join(".cleaner_ultra-trash/recover.jpg");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::copy(&source, &target).unwrap();
     f.db()
@@ -956,7 +966,7 @@ fn recovery_continues_past_corrupt_copy_without_deleting_it() {
         .unwrap()["id"]
         .as_i64()
         .unwrap();
-    let trash = f.root.join(".photosort-trash");
+    let trash = f.root.join(".cleaner_ultra-trash");
     fs::create_dir_all(&trash).unwrap();
     let corrupt = trash.join("corrupt.jpg");
     fs::write(&corrupt, b"not the indexed photo").unwrap();
@@ -1159,7 +1169,7 @@ fn burst_groups_and_child_scan() {
 #[test]
 fn api_rejects_cross_site_mutations() {
     let f = Fixture::new();
-    let url = photosort::server::serve(f.library.clone(), 0).unwrap();
+    let url = cleaner_ultra::server::serve(f.library.clone(), 0).unwrap();
     let host = url.trim_start_matches("http://");
     fn request(host: &str, data: &str) -> String {
         let mut stream = std::net::TcpStream::connect(host).unwrap();
@@ -1222,7 +1232,7 @@ fn legacy_v01_database_preserves_favorites_and_restores_trash() {
     let legacy_root = fs::canonicalize(&f.root).unwrap();
     let legacy_root = PathBuf::from(legacy_root.to_string_lossy().trim_start_matches(r"\\?\"));
     let hash = analysis::fingerprint(&original).unwrap();
-    let trash_dir = f.root.join(".photosort-trash");
+    let trash_dir = f.root.join(".cleaner_ultra-trash");
     fs::create_dir(&trash_dir).unwrap();
     let trash = trash_dir.join("legacy-copy.jpg");
     fs::copy(&original, &trash).unwrap();
@@ -1375,4 +1385,24 @@ fn culling_group_respects_selected_root() {
             .unwrap()["total"],
         0
     );
+}
+#[test]
+fn old_brand_media_trash_restores_after_rename() {
+    let f = Fixture::new();
+    let original = f.image("legacy.jpg", 123);
+    f.scan();
+    let id = f.photos("all")[0]["id"].as_i64().unwrap();
+    let vault = f.root.join(".photosort-trash/legacy.jpg");
+    fs::create_dir_all(vault.parent().unwrap()).unwrap();
+    fs::rename(&original, &vault).unwrap();
+    f.db()
+        .execute(
+            "UPDATE photos SET trash=? WHERE id=?",
+            params![vault.to_string_lossy(), id],
+        )
+        .unwrap();
+    let outcome = f.library.move_photos(&[id], true).unwrap();
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(original.is_file());
+    assert!(!vault.exists());
 }

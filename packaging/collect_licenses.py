@@ -4,7 +4,7 @@ import shutil
 import sys
 from pathlib import Path
 
-destination = Path(__file__).resolve().parent.parent / 'dist' / 'PhotoSort' / 'licenses'
+destination = Path(__file__).resolve().parent.parent / 'dist' / 'CleanerUltra' / 'licenses'
 destination.mkdir(parents=True, exist_ok=True)
 packages = ['Pillow', 'pywebview', 'pythonnet', 'clr_loader', 'cffi', 'pycparser',
             'bottle', 'proxy_tools', 'typing_extensions', 'setuptools', 'numpy']

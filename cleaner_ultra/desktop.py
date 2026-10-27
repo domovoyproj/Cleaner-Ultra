@@ -17,13 +17,13 @@ def main():
     if sys.platform == 'win32':
         kernel = ctypes.windll.kernel32
         kernel.CreateMutexW.restype = ctypes.c_void_p
-        mutex = kernel.CreateMutexW(None, False, 'Local\\PhotoSortDesktop')
+        mutex = kernel.CreateMutexW(None, False, 'Local\\CleanerUltraDesktop')
         if kernel.GetLastError() == 183:
-            ctypes.windll.user32.MessageBoxW(None, 'PhotoSort уже запущен.', 'PhotoSort', 0x40)
+            ctypes.windll.user32.MessageBoxW(None, 'Cleaner Ultra уже запущен.', 'Cleaner Ultra', 0x40)
             return
-    data = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / '.local' / 'share'))) / 'PhotoSort'
+    data = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / '.local' / 'share'))) / 'CleanerUltra'
     data.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=data / 'photosort.log', level=logging.WARNING)
+    logging.basicConfig(filename=data / 'cleaner_ultra.log', level=logging.WARNING)
     library = Library(data)
     window = None
 
@@ -35,15 +35,15 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        window = webview.create_window('PhotoSort', f'http://127.0.0.1:{server.server_port}',
+        window = webview.create_window('Cleaner Ultra', f'http://127.0.0.1:{server.server_port}',
                               width=1440, height=940, min_size=(860, 640), background_color='#fafafa')
         webview.start()
     except Exception:
         logging.exception('Desktop startup failed')
         if sys.platform == 'win32':
             ctypes.windll.user32.MessageBoxW(None,
-                'Не удалось открыть PhotoSort. Установите Microsoft Edge WebView2 Runtime. Подробности: %LOCALAPPDATA%\\PhotoSort\\photosort.log',
-                'PhotoSort', 0x10)
+                'Не удалось открыть Cleaner Ultra. Установите Microsoft Edge WebView2 Runtime. Подробности: %LOCALAPPDATA%\\CleanerUltra\\cleaner_ultra.log',
+                'Cleaner Ultra', 0x10)
         raise
     finally:
         server.shutdown()

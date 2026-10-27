@@ -15,7 +15,7 @@ use std::{
 };
 
 const PAGE: i64 = 60;
-const VAULT: &str = ".photosort-space-trash";
+const VAULT: &str = ".cleaner_ultra-space-trash";
 
 #[derive(Clone, Default, Serialize)]
 pub struct ScanProgress {
@@ -269,6 +269,9 @@ impl Space {
                         s.to_lowercase().as_str(),
                         ".photosort-trash"
                             | ".photosort-space-trash"
+                            | ".photosort"
+                            | ".cleaner_ultra-trash"
+                            | ".cleaner_ultra-space-trash"
                             | "$recycle.bin"
                             | "system volume information"
                             | "windows.old"
@@ -439,6 +442,9 @@ impl Space {
                     name.as_str(),
                     ".photosort-trash"
                         | ".photosort-space-trash"
+                        | ".photosort"
+                        | ".cleaner_ultra-trash"
+                        | ".cleaner_ultra-space-trash"
                         | "$recycle.bin"
                         | "system volume information"
                 ) && !entry.path().starts_with(&self.data)
@@ -738,7 +744,7 @@ impl Space {
             let Some(parent) = original.parent() else {
                 continue;
             };
-            let vault_dir = parent.join(VAULT);
+            let vault_dir = crate::compat::space_vault(parent, vault);
             if canonical(root).ok().as_deref() != Some(root)
                 || canonical(&vault_dir).ok().as_deref() != Some(vault_dir.as_path())
                 || vault.parent() != Some(vault_dir.as_path())
@@ -811,6 +817,7 @@ impl Space {
         self.recover()?;
         let root = canonical(Path::new(&p.root))?;
         let mut done = 0;
+        let mut moved_bytes = 0u64;
         let mut errors = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for id in ids {
@@ -874,6 +881,7 @@ impl Space {
                     .lock()
                     .execute("UPDATE trash SET state='stored' WHERE id=?", [op])?;
                 self.forget(path)?;
+                moved_bytes += file.size;
                 Ok(())
             })();
             match result {
@@ -882,7 +890,7 @@ impl Space {
             }
         }
         Ok(
-            json!({"done":done,"errors":errors,"note":"Файлы сохранены в корзине на исходном диске. Свободное место пока не изменилось."}),
+            json!({"done":done,"moved_bytes":moved_bytes,"freed_bytes":0,"errors":errors,"note":"Файлы сохранены в корзине на исходном диске. Свободное место пока не изменилось."}),
         )
     }
     pub fn trash(&self, offset: i64) -> Result<Value> {
@@ -920,12 +928,16 @@ impl Space {
                 let target = Path::new(&original);
                 let root = PathBuf::from(root);
                 if canonical(&root)? != root
-                    || source.parent() != target.parent().map(|p| p.join(VAULT)).as_deref()
-                    || canonical(source.parent().context("Нет папки корзины")?)?
+                    || source.parent()
                         != target
                             .parent()
-                            .context("Нет родительской папки")?
-                            .join(VAULT)
+                            .map(|p| crate::compat::space_vault(p, source))
+                            .as_deref()
+                    || canonical(source.parent().context("Нет папки корзины")?)?
+                        != crate::compat::space_vault(
+                            target.parent().context("Нет родительской папки")?,
+                            source,
+                        )
                     || source.is_symlink()
                     || !target.starts_with(&root)
                 {
@@ -957,6 +969,34 @@ impl Space {
         }
         Ok(json!({"done":done,"errors":errors}))
     }
+    pub fn optimization_paths(&self, drive: &str) -> Result<Vec<String>> {
+        if drive.len() != 2
+            || !drive.as_bytes()[0].is_ascii_alphabetic()
+            || drive.as_bytes()[1] != b':'
+        {
+            bail!("Выберите локальный диск");
+        }
+        let p = self.progress.lock().clone();
+        if p.state != "complete" {
+            bail!("Сначала завершите анализ диска или папки");
+        }
+        if Self::exclusions_pending(&self.db.lock())? {
+            bail!("Исключения изменились. Повторите анализ");
+        }
+        let prefix = format!("{}\\", drive.to_ascii_uppercase());
+        let db = self.db.lock();
+        let mut q =
+            db.prepare("SELECT path FROM files WHERE scan=? AND protected=0 ORDER BY size DESC")?;
+        let paths = q
+            .query_map([p.id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(paths
+            .into_iter()
+            .filter(|path| {
+                path.to_ascii_uppercase().starts_with(&prefix) && !self.protected(Path::new(path))
+            })
+            .collect())
+    }
     pub fn reveal(&self, id: i64) -> Result<Value> {
         let file = self.file(id)?;
         reveal_file(Path::new(&file.path))?;
@@ -964,11 +1004,13 @@ impl Space {
     }
     pub fn reveal_trash(&self, id: i64) -> Result<Value> {
         let(original,vault):(String,String)=self.db.lock().query_row("SELECT original,vault FROM trash WHERE id=? AND state IN('pending','stored','restoring')",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let expected = Path::new(&original)
-            .parent()
-            .context("Некорректный исходный путь")?
-            .join(VAULT);
         let vault = Path::new(&vault);
+        let expected = crate::compat::space_vault(
+            Path::new(&original)
+                .parent()
+                .context("Некорректный исходный путь")?,
+            vault,
+        );
         if vault.parent() != Some(expected.as_path())
             || canonical(&expected)? != expected
             || !vault.is_file()
@@ -1083,63 +1125,9 @@ pub fn quote_windows_arg(value: &str) -> String {
     out.push('"');
     out
 }
-pub fn optimize_drive(drive: &str, analyze: bool) -> Result<Value> {
-    if drive.len() != 2 || !drive.as_bytes()[0].is_ascii_alphabetic() || drive.as_bytes()[1] != b':'
-    {
-        bail!("Выберите локальный диск")
-    }
-    let drive = drive.to_uppercase();
-    if !drives()
-        .iter()
-        .any(|d| d["path"] == format!("{drive}\\") && d["optimizable"] == true)
-    {
-        bail!("Диск недоступен для оптимизации")
-    }
-    launch_elevated_optimizer(&drive, analyze)?;
-    Ok(
-        json!({"launched":true,"mode":if analyze{"analyze"}else{"optimize"},"message":"Запрошен запуск системного окна. Подтвердите UAC; результат и ход работы отображаются Windows."}),
-    )
-}
-#[cfg(windows)]
-fn launch_elevated_optimizer(drive: &str, analyze: bool) -> Result<()> {
-    #[link(name = "shell32")]
-    unsafe extern "system" {
-        fn ShellExecuteW(
-            hwnd: *mut std::ffi::c_void,
-            operation: *const u16,
-            file: *const u16,
-            params: *const u16,
-            directory: *const u16,
-            show: i32,
-        ) -> isize;
-    }
-    let system = std::env::var_os("SystemRoot").context("Не найдена папка Windows")?;
-    let executable = PathBuf::from(system).join("System32/defrag.exe");
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let operation = wide("runas");
-    let file = wide(&executable.to_string_lossy());
-    let arguments = wide(&format!(
-        "{drive} {} /U /V",
-        if analyze { "/A" } else { "/O" }
-    ));
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            file.as_ptr(),
-            arguments.as_ptr(),
-            std::ptr::null(),
-            1,
-        )
-    };
-    if result <= 32 {
-        bail!("Windows не запустила оптимизацию (код {result}); возможно, запрос отменён")
-    }
-    Ok(())
-}
-#[cfg(not(windows))]
-fn launch_elevated_optimizer(_: &str, _: bool) -> Result<()> {
-    bail!("Оптимизация доступна на Windows")
+// External optimizer launch has been removed. Requests go to the in-process worker.
+pub fn optimize_drive(_drive: &str, _analyze: bool) -> Result<Value> {
+    bail!("Используйте встроенный движок Cleaner Ultra")
 }
 
 pub fn system_page(page: &str) -> Result<Value> {
@@ -1148,15 +1136,12 @@ pub fn system_page(page: &str) -> Result<Value> {
         use std::os::windows::process::CommandExt;
         let windows = PathBuf::from(std::env::var_os("SystemRoot").context("Не найдена Windows")?);
         match page {
-            "optimize" => {
-                std::process::Command::new(windows.join("System32/dfrgui.exe"))
-                    .creation_flags(0x08000000)
-                    .spawn()?;
-            }
-            "storage" | "apps" | "recycle" => {
+            "optimize" => bail!("Используйте встроенный движок Cleaner Ultra"),
+            "storage" | "apps" | "recycle" | "startup" => {
                 let target = match page {
                     "storage" => "ms-settings:storagesense",
                     "apps" => "ms-settings:appsfeatures",
+                    "startup" => "ms-settings:startupapps",
                     _ => "shell:RecycleBinFolder",
                 };
                 std::process::Command::new(windows.join("explorer.exe"))

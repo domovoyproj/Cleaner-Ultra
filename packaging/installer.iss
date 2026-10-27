@@ -1,19 +1,22 @@
 #ifndef AppVersion
-  #define AppVersion "0.6.2"
+  #define AppVersion "0.7.0"
+#endif
+#ifndef AppId
+  #define AppId "{{49DBF80E-5227-44E8-B78F-206A578F593B}"
 #endif
 [Setup]
-AppId={{49DBF80E-5227-44E8-B78F-206A578F593B}
-AppName=PhotoSort
+AppId={#AppId}
+AppName=Cleaner Ultra
 AppVersion={#AppVersion}
 AppPublisher=domovoyproj
-AppPublisherURL=https://github.com/domovoyproj/PhotoSort
-DefaultDirName={localappdata}\Programs\PhotoSort
-DefaultGroupName=PhotoSort
+AppPublisherURL=https://github.com/domovoyproj/Cleaner-Ultra
+DefaultDirName={localappdata}\Programs\CleanerUltra
+DefaultGroupName=Cleaner Ultra
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=PhotoSort-Setup-{#AppVersion}-windows-x64
-SetupIconFile=photosort.ico
-UninstallDisplayIcon={app}\PhotoSort.exe
+OutputBaseFilename=CleanerUltra-Setup-{#AppVersion}-windows-x64
+SetupIconFile=cleaner_ultra.ico
+UninstallDisplayIcon={app}\CleanerUltra.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -24,15 +27,15 @@ CloseApplications=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Files]
-Source: "..\dist\PhotoSort-{#AppVersion}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\CleanerUltra-{#AppVersion}\*"; DestDir: "{app}"; Excludes: "*.WebView2\*,webview\*,*.sqlite3,*.sqlite3-wal,*.sqlite3-shm"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Icons]
-Name: "{group}\PhotoSort"; Filename: "{app}\PhotoSort.exe"
-Name: "{autodesktop}\PhotoSort"; Filename: "{app}\PhotoSort.exe"; Tasks: desktopicon
+Name: "{group}\Cleaner Ultra"; Filename: "{app}\CleanerUltra.exe"
+Name: "{autodesktop}\Cleaner Ultra"; Filename: "{app}\CleanerUltra.exe"; Tasks: desktopicon
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; Flags: unchecked
 [Run]
 Filename: "{app}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Установка Microsoft WebView2…"; Flags: waituntilterminated; Check: NeedsWebView2
-Filename: "{app}\PhotoSort.exe"; Description: "Запустить PhotoSort"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\CleanerUltra.exe"; Description: "Запустить Cleaner Ultra"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function NeedsWebView2: Boolean;

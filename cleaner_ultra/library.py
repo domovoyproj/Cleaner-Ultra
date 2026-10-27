@@ -153,7 +153,7 @@ class Library:
         try:
             with self.connect() as db:
                 for directory, dirs, files in os.walk(root, followlinks=False, onerror=self.scan_error):
-                    dirs[:] = [d for d in dirs if d not in {'.photosort-trash', '.git', '.photosort'}
+                    dirs[:] = [d for d in dirs if d not in {'.cleaner_ultra-trash', '.photosort-trash', '.photosort-space-trash', '.photosort', '.git', '.cleaner_ultra'}
                                and not (Path(directory) / d).is_symlink()
                                and (Path(directory) / d).resolve() != self.data_dir]
                     for name in files:
@@ -297,10 +297,10 @@ class Library:
                         source = original
                         if fingerprint(source) != photo['hash']:
                             raise ValueError('Файл изменился. Сначала пересканируйте папку')
-                        target = Path(photo['root']) / '.photosort-trash' / f'{uuid.uuid4().hex}{source.suffix}'
+                        target = Path(photo['root']) / '.cleaner_ultra-trash' / f'{uuid.uuid4().hex}{source.suffix}'
                     if target.exists():
                         raise ValueError('Путь уже занят; существующий файл сохранён')
-                    trash_dir = root / '.photosort-trash'
+                    trash_dir = root / '.cleaner_ultra-trash'
                     if trash_dir.is_symlink() or (trash_dir.exists() and trash_dir.resolve() != trash_dir):
                         raise ValueError('Папка корзины не должна быть ссылкой')
                     target.parent.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,4 @@
-use photosort::space::Space;
+use cleaner_ultra::space::Space;
 use rusqlite::{Connection, params};
 use std::{
     fs,
@@ -82,8 +82,8 @@ fn scan_all_file_types_counts_nested_folders_and_preserves_sources() {
     f.write("docs/Отчёт.PDF", b"not a decoded PDF");
     f.write("docs/nested/a.bin", b"1234");
     f.write("clips/clip.mp4", b"invalid video still counted");
-    f.write(".photosort-space-trash/hidden.bin", b"ignored");
-    f.write(".photosort-trash/hidden.jpg", b"ignored");
+    f.write(".cleaner_ultra-space-trash/hidden.bin", b"ignored");
+    f.write(".cleaner_ultra-trash/hidden.jpg", b"ignored");
     f.scan();
     assert_eq!(f.files()["total"], 3);
     let p = f.space.progress.lock().clone();
@@ -190,9 +190,9 @@ fn crash_recovery_preserves_replacement_and_original_copy() {
     let f = Fixture::new();
     let path = f.write("a.bin", b"original");
     f.scan();
-    let hash = photosort::analysis::fingerprint(&path).unwrap();
+    let hash = cleaner_ultra::analysis::fingerprint(&path).unwrap();
     let root = f.space.progress.lock().root.clone();
-    let vault = Path::new(&root).join(".photosort-space-trash/copy.bin");
+    let vault = Path::new(&root).join(".cleaner_ultra-space-trash/copy.bin");
     fs::create_dir_all(vault.parent().unwrap()).unwrap();
     fs::copy(&path, &vault).unwrap();
     f.db().execute("INSERT INTO trash(original,vault,root,size,hash,state,created) VALUES(?,?,?,?,?,'pending',1)",params![path.to_string_lossy(),vault.to_string_lossy(),root,8,hash]).unwrap();
@@ -240,18 +240,21 @@ fn reopened_index_restores_interrupted_restore_journal() {
 #[test]
 fn optimizer_rejects_arbitrary_command_arguments() {
     for input in ["C: /D", "C:\\Windows", "C:;whoami", "\\\\server\\share", ""] {
-        assert!(photosort::space::optimize_drive(input, false).is_err());
+        assert!(cleaner_ultra::space::optimize_drive(input, false).is_err());
     }
 }
 
 #[test]
 fn elevation_quotes_spaces_and_trailing_backslashes() {
     assert_eq!(
-        photosort::space::quote_windows_arg(r"C:\My Data"),
+        cleaner_ultra::space::quote_windows_arg(r"C:\My Data"),
         r#""C:\My Data""#
     );
-    assert_eq!(photosort::space::quote_windows_arg(r"C:\"), r#""C:\\""#);
-    assert_eq!(photosort::space::quote_windows_arg("x\"y"), "\"x\\\"y\"");
+    assert_eq!(cleaner_ultra::space::quote_windows_arg(r"C:\"), r#""C:\\""#);
+    assert_eq!(
+        cleaner_ultra::space::quote_windows_arg("x\"y"),
+        "\"x\\\"y\""
+    );
 }
 
 #[test]
@@ -314,8 +317,8 @@ fn same_size_edit_within_one_second_is_rejected() {
 fn space_routes_preserve_media_and_share_persistent_theme() {
     use std::io::{Read, Write};
     let temp = tempfile::tempdir().unwrap();
-    let library = photosort::library::Library::open(temp.path()).unwrap();
-    let url = photosort::server::serve(library.clone(), 0).unwrap();
+    let library = cleaner_ultra::library::Library::open(temp.path()).unwrap();
+    let url = cleaner_ultra::server::serve(library.clone(), 0).unwrap();
     let host = url.trim_start_matches("http://");
     let request = |path: &str, body: Option<&str>, token: &str| -> String {
         let mut stream = std::net::TcpStream::connect(host).unwrap();
@@ -324,7 +327,7 @@ fn space_routes_preserve_media_and_share_persistent_theme() {
             .unwrap();
         let text = if let Some(body) = body {
             format!(
-                "POST {path} HTTP/1.1\r\nHost: {host}\r\nX-PhotoSort-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "POST {path} HTTP/1.1\r\nHost: {host}\r\nX-CleanerUltra-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )
         } else {
@@ -596,7 +599,7 @@ fn cleanup_rejects_old_rows_after_an_interrupted_new_scan() {
     .unwrap();
     let scan = db.last_insert_rowid();
     db.execute("UPDATE space_settings SET value=(SELECT value FROM space_settings WHERE key='exclusions_revision') WHERE key='scan_exclusions_revision'", []).unwrap();
-    *f.space.progress.lock() = photosort::space::ScanProgress {
+    *f.space.progress.lock() = cleaner_ultra::space::ScanProgress {
         id: scan,
         state: "error".into(),
         ..old
@@ -610,4 +613,47 @@ fn cleanup_rejects_old_rows_after_an_interrupted_new_scan() {
             .contains("текущем анализе")
     );
     assert_eq!(fs::read(path).unwrap(), b"must stay");
+}
+#[test]
+fn legacy_space_vault_recovers_and_restores_with_exact_bytes() {
+    let f = Fixture::new();
+    let original = f.write("legacy.bin", b"legacy bytes");
+    f.scan();
+    let root = f.space.progress.lock().root.clone();
+    let hash = cleaner_ultra::analysis::fingerprint(&original).unwrap();
+    let vault = Path::new(&root).join(".photosort-space-trash/legacy.bin");
+    fs::create_dir_all(vault.parent().unwrap()).unwrap();
+    fs::rename(&original, &vault).unwrap();
+    f.db().execute("INSERT INTO trash(original,vault,root,size,hash,state,created) VALUES(?,?,?,?,?,'pending',1)",params![original.to_string_lossy(),vault.to_string_lossy(),root,12,hash]).unwrap();
+    f.space.recover().unwrap();
+    let trash = f.space.trash(0).unwrap();
+    assert_eq!(trash["files"][0]["state"], "stored");
+    let id = trash["files"][0]["id"].as_i64().unwrap();
+    assert_eq!(f.space.restore(&[id]).unwrap()["done"], 1);
+    assert_eq!(fs::read(original).unwrap(), b"legacy bytes");
+    assert!(!vault.exists());
+}
+#[test]
+fn cleanup_summary_counts_only_successful_moves_and_never_claims_freed_bytes() {
+    let f = Fixture::new();
+    f.write("one.bin", b"12345");
+    f.write("two.bin", b"1234567");
+    f.scan();
+    let scan = f.space.progress.lock().id;
+    let r = f
+        .space
+        .quarantine(&[f.id("one.bin"), f.id("two.bin")], scan)
+        .unwrap();
+    assert_eq!(r["done"], 2);
+    assert_eq!(r["moved_bytes"], 12);
+    assert_eq!(r["freed_bytes"], 0);
+}
+#[test]
+fn legacy_vaults_are_excluded_from_new_scans() {
+    let f = Fixture::new();
+    f.write("visible.bin", b"yes");
+    f.write(".photosort-trash/hidden.bin", b"no");
+    f.write(".photosort-space-trash/hidden.bin", b"no");
+    f.scan();
+    assert_eq!(f.files()["total"], 1);
 }

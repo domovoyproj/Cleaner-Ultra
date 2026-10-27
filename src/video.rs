@@ -15,7 +15,7 @@ pub fn is_video(path: &Path) -> bool {
     EXTENSIONS.contains(&analysis::extension(path).as_str())
 }
 pub fn tool(name: &str) -> Option<PathBuf> {
-    let variable = format!("PHOTOSORT_{}", name.to_uppercase());
+    let variable = format!("CLEANER_ULTRA_{}", name.to_uppercase());
     if let Some(path) = std::env::var_os(variable) {
         let path = PathBuf::from(path);
         if path.is_file() {
@@ -30,7 +30,7 @@ pub fn tool(name: &str) -> Option<PathBuf> {
     };
     [
         executable.join("ffmpeg").join(&name),
-        PathBuf::from(".photosort/tools/ffmpeg").join(name),
+        PathBuf::from(".cleaner_ultra/tools/ffmpeg").join(name),
     ]
     .into_iter()
     .find(|path| path.is_file())
@@ -48,7 +48,7 @@ impl Drop for Temporary {
 }
 fn command(name: &str) -> Result<Command> {
     let mut command = Command::new(tool(name).with_context(|| {
-        format!("Не найден {name}. Нужен полный комплект PhotoSort с поддержкой видео")
+        format!("Не найден {name}. Нужен полный комплект CleanerUltra с поддержкой видео")
     })?);
     command.args(["-v", "error", "-max_alloc", "67108864"]);
     if name == "ffmpeg" {

@@ -51,7 +51,7 @@
     }
     root.querySelectorAll?.('[data-icon]:not(svg)').forEach(el=>{el.replaceChildren(create(el.dataset.icon));el.removeAttribute('data-icon');});
   }
-  window.PhotoSortIcons={create,hydrate};
+  window.CleanerUltraIcons={create,hydrate};
   const style=document.createElement('style');style.textContent='.ps-icon{display:inline-block;width:20px;height:20px;flex-shrink:0;vertical-align:middle;pointer-events:none}.window-dots .ps-icon{width:10px;height:10px;opacity:0}.window-dots:hover .ps-icon{opacity:1}';document.head.append(style);
   const observer=new MutationObserver(records=>{observer.disconnect();for(const r of records){if(r.type==='characterData')hydrate(r.target);else for(const n of r.addedNodes)hydrate(n);}observe();});
   function observe(){observer.observe(document.body,{childList:true,subtree:true,characterData:true});}

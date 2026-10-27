@@ -1,0 +1,11 @@
+
+running 3 tests
+test maintenance::native_qa::native_registry_clean_restore_own_value ... native registry cleanup + exact restore verified; own UUID value removed by guard
+ok
+test optimizer::native::native_cluster_relocation_own_fixture ... native relocation verified: own 16 MiB fixture, SHA-256 preserved
+ok
+test trim::native_qa::native_retrim_own_data_preserved ... Windows Storage API ReTrim completed; own allocated file SHA-256 preserved
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 3.25s
+
