@@ -28,6 +28,23 @@ pub struct Rule {
 fn normal(path: &Path) -> PathBuf {
     PathBuf::from(path.to_string_lossy().trim_start_matches(r"\\?\"))
 }
+// Expand DOS 8.3 aliases without resolving junctions as canonicalize() does.
+// Windows can return a short TEMP path even when the profile uses a long name.
+#[cfg(windows)]
+fn long_form(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    let input: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut output = vec![0u16; 32768];
+    let len = unsafe { GetLongPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+        as usize;
+    (len > 0 && len < output.len())
+        .then(|| normal(Path::new(&std::ffi::OsString::from_wide(&output[..len]))))
+}
+#[cfg(not(windows))]
+fn long_form(path: &Path) -> Option<PathBuf> {
+    Some(path.to_owned())
+}
 fn safe_root(root: &Path) -> bool {
     root.is_dir()
         && !root.is_symlink()
@@ -47,8 +64,10 @@ fn rule(
     if root.file_name().is_none() {
         return None;
     }
-    // Reject a path that resolves through a junction or a substituted profile.
-    if path
+    // The expanded lexical path must still equal the resolved path. A junction
+    // keeps its lexical name and therefore remains rejected by this comparison.
+    let lexical = long_form(&path).unwrap_or_else(|| normal(&path));
+    if lexical
         .to_string_lossy()
         .trim_end_matches(['\\', '/'])
         .to_lowercase()
@@ -694,6 +713,25 @@ mod tests {
             )
             .is_none()
         );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn category_accepts_dos_short_names_without_changing_the_resolved_root() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("own-long-browser-cache-directory");
+        std::fs::create_dir(&path).unwrap();
+        let input: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut output = vec![0u16; 32768];
+        let len =
+            unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+                as usize;
+        assert!(len > 0 && len < output.len());
+        let short = PathBuf::from(std::ffi::OsString::from_wide(&output[..len]));
+        let r = rule("browsers", "Own short-path fixture".into(), short, 0, &[]).unwrap();
+        assert_eq!(r.root, normal(&std::fs::canonicalize(path).unwrap()));
+        assert!(safe_root(&r.root));
     }
     #[test]
     fn cleanup_respects_global_exclusions_and_rejects_changed_rules() {
