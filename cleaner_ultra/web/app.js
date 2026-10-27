@@ -11,7 +11,7 @@ document.querySelectorAll("[data-window-command]").forEach((button) => {
   button.onclick = () => windowCommand(button.dataset.windowCommand);
 });
 if (desktopWindow) {
-  document.querySelectorAll(".window-dots, .topbar").forEach((region) => {
+  document.querySelectorAll(".desktop-titlebar, .topbar").forEach((region) => {
     region.addEventListener("mousedown", (event) => {
       if (
         event.button !== 0 ||

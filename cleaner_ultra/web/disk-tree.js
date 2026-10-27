@@ -30,7 +30,7 @@
   async function load(data){
     tree.generation++;tree.nodes.clear();tree.scan=data.scan||0;tree.root=data;const host=$('#disk-tree');host.replaceChildren();
     if(!data.path){host.append(node('p','empty-note','Выберите диск или папку и запустите анализ.'));return;}
-    const root=row({path:data.path,kind:'folder',bytes:data.bytes,files:data.files,protected:true},1,null);root.loaded=true;root.opened=true;root.children.hidden=false;root.expand.textContent='⌄';root.wrapper.setAttribute('aria-expanded','true');host.append(root.wrapper);
+    const root=row({path:data.path,kind:'folder',bytes:data.bytes,files:data.files,protected:true},1,null);root.loaded=true;root.opened=true;root.children.hidden=false;root.expand.textContent='⌄';root.expand.setAttribute('aria-label',`Свернуть ${basename(data.path)||data.path}`);root.wrapper.setAttribute('aria-expanded','true');host.append(root.wrapper);
     for(const item of data.entries)root.children.append(row(item,2,root).wrapper);
     if(data.entries.length<data.total){const more=node('button','button secondary tree-more',`Показать ещё · ${data.entries.length} из ${num(data.total)}`);more.onclick=()=>action(()=>fetchChildren(root,data.entries.length));root.children.append(more);}
   }

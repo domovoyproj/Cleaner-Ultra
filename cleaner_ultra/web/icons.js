@@ -1,6 +1,10 @@
 (() => {
   "use strict";
   const paths = {
+    bolt:'<path d="m13 2-9 12h7l-1 8 10-13h-7Z"/>',
+    activity:'<path d="M2 12h4l3-8 6 16 3-8h4"/>',
+    window:'<rect x="5" y="5" width="14" height="14" rx="1"/>',
+    'arrow-right':'<path d="M4 12h16m-6-6 6 6-6 6"/>',
     home:'<path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/>',
     grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
     files:'<path d="M8 3h8l4 4v14H8Z"/><path d="M16 3v5h4M4 7v14"/>',
