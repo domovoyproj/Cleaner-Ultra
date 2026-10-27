@@ -1,10 +1,7 @@
+mod common;
 use cleaner_ultra::{library::Library, server};
 use serde_json::{Value, json};
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-    time::Duration,
-};
+use std::{io::Write, net::TcpStream, time::Duration};
 fn request(host: &str, path: &str, body: Option<Value>, token: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(host).unwrap();
     stream
@@ -20,12 +17,10 @@ fn request(host: &str, path: &str, body: Option<Value>, token: &str) -> (u16, St
         format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
     };
     stream.write_all(request.as_bytes()).unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let (head, body) = common::response(&mut stream);
     (
         head.split_whitespace().nth(1).unwrap().parse().unwrap(),
-        body.into(),
+        String::from_utf8(body).unwrap(),
     )
 }
 #[test]
@@ -38,9 +33,14 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
     assert_eq!(status, 200);
     let session: Value = serde_json::from_str(&session).unwrap();
     let token = session["token"].as_str().unwrap();
-    assert_eq!(session["version"], "0.7.0");
+    assert_eq!(session["version"], env!("CARGO_PKG_VERSION"));
     for path in [
         "/api/maintenance/scan",
+        "/api/startup/scan",
+        "/api/registry/scan",
+        "/api/startup/apply",
+        "/api/registry/apply",
+        "/api/power/apply",
         "/api/maintenance/apply",
         "/api/maintenance/restore",
         "/api/apps/uninstall",
@@ -51,6 +51,9 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
     }
     for path in [
         "/api/maintenance/apply",
+        "/api/startup/apply",
+        "/api/registry/apply",
+        "/api/power/apply",
         "/api/apps/uninstall",
         "/api/space/optimize",
     ] {
@@ -89,6 +92,11 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
     for path in [
         "/maintenance.js",
         "/maintenance.css",
+        "/wizard.js",
+        "/cleanup-plan.js",
+        "/performance.js",
+        "/api/cache/status",
+        "/api/cleanup/defaults",
         "/api/maintenance/backups",
         "/api/history",
         "/api/optimizer/status",
@@ -96,7 +104,9 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
         assert_eq!(request(host, path, None, "").0, 200);
     }
     let (_, html) = request(host, "/", None, "");
-    assert!(html.contains("Реестр и автозагрузка"));
+    assert!(html.contains("data-page=\"registry\""));
+    assert!(html.contains("data-page=\"startup\""));
+    assert!(html.contains("Ускорить и очистить"));
     assert!(html.contains("Удаление программ"));
     assert!(html.contains("Cleaner Ultra"));
     assert!(!html.contains("PhotoSort"));
@@ -126,6 +136,25 @@ fn native_inventory_is_read_only_and_usable() {
     assert_eq!(code, 200);
     let registry: Value = serde_json::from_str(&registry).unwrap();
     assert!(registry["items"].is_array());
+    for path in ["/api/startup/scan", "/api/registry/scan"] {
+        let (code, body) = request(host, path, Some(json!({})), token);
+        assert_eq!(code, 200, "{path}: {body}");
+        assert!(serde_json::from_str::<Value>(&body).unwrap()["items"].is_array());
+    }
+    for path in ["/api/performance", "/api/power"] {
+        let (code, body) = request(host, path, None, "");
+        assert_eq!(code, 200, "{path}: {body}");
+    }
+    assert_eq!(
+        request(
+            host,
+            "/api/power/apply",
+            Some(json!({"id":"invented","confirmed":true})),
+            token
+        )
+        .0,
+        400
+    );
     // No modification and no deinstaller launch occurs in this test.
     assert_eq!(
         request(

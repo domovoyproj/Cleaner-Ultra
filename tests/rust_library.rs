@@ -1,3 +1,4 @@
+mod common;
 use cleaner_ultra::{
     analysis::{self, BKTree, HammingIndex},
     library::Library,
@@ -1177,8 +1178,8 @@ fn api_rejects_cross_site_mutations() {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         stream.write_all(data.as_bytes()).unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = common::response(&mut stream);
+        let response = format!("{head}\r\n\r\n{}", String::from_utf8(body).unwrap());
         response
     }
     let response = request(

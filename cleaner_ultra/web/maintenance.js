@@ -1,9 +1,9 @@
 /* Maintenance uses the same authenticated local API and persistent theme as disk analysis. */
 (() => {
-  const model={registry:[],selected:new Set(),apps:[],appOffset:0,history:[],loadedApps:false,loadedRegistry:false,optimizerTimer:null};
+  const model={registry:[],startup:[],selections:{startup:new Set(),registry:new Set()},offsets:{startup:0,registry:0},apps:[],appOffset:0,history:[],loadedApps:false,loadedRegistry:false,backupOffset:0,optimizerTimer:null};
   const button=(text,fn,cls="button secondary")=>{const b=node("button",cls,text);b.type="button";b.onclick=()=>action(fn);return b;};
   const labels={missing:"EXE не найден",present:"EXE существует",review:"Ручная проверка"};
-  const kinds={"/api/optimizer/completed":"Встроенная оптимизация","/api/space/trash":"Файлы в корзину","/api/space/restore":"Восстановление файлов","/api/maintenance/apply":"Изменение реестра","/api/maintenance/restore":"Восстановление реестра","/api/apps/uninstall":"Запуск удаления программы","/api/cache":"Обслуживание кеша"};
+  const kinds={"/api/startup/apply":"Автозагрузка","/api/registry/apply":"Исправление реестра","/api/power/apply":"Смена схемы питания","/api/optimizer/completed":"Встроенная оптимизация","/api/space/trash":"Файлы в корзину","/api/space/restore":"Восстановление файлов","/api/maintenance/apply":"Изменение реестра","/api/maintenance/restore":"Восстановление реестра","/api/apps/uninstall":"Запуск удаления программы","/api/cache":"Обслуживание кеша"};
   function metrics(r){
     const parts=[];
     if(r.checked!==undefined)parts.push(`Проверено файлов: ${num(r.checked)}`,`Дефрагментировано: ${num(r.moved)}`,`Проверено SHA-256: ${bytes(r.verified_bytes)}`,`Состояние: ${r.state}`);
@@ -32,43 +32,51 @@
       try{const r=await run();$("#ultra-confirm").close();result(title,r);}finally{b.disabled=false;}
     });$("#ultra-confirm").showModal();
   }
-  function registrySelection(){
-    const values=model.registry.filter(r=>model.selected.has(r.id));
-    $("#registry-selection").textContent=values.length?`Выбрано: ${num(values.length)} / 100`:"Ничего не выбрано";
-    $("#registry-clean").disabled=!values.length||values.some(r=>!r.removable);
-    $("#startup-disable").disabled=!values.length;
+  const categoryNames={app_paths:"Путь приложения",icons:"Значок удалённой программы",com_dll:"COM-библиотека",com_exe:"COM-сервер",startup:"Автозагрузка"};
+  function selection(scope){
+    const values=model[scope].filter(r=>model.selections[scope].has(r.id));
+    $(`#${scope}-selection`).textContent=`Выбрано: ${num(values.length)} · отсутствующих: ${num(model[scope].filter(r=>r.removable).length)}`;
+    $(`#${scope}-clean`).disabled=!values.length||values.some(r=>!r.removable);
+    $(`#${scope}-missing`).disabled=!model[scope].some(r=>r.removable);
+    if(scope==="startup")$("#startup-disable").disabled=!values.length;
   }
-  function renderRegistry(){
-    const filter=$("#registry-filter").value;
-    const values=model.registry.filter(r=>filter==="all"||r.state===filter);
-    $("#registry-list").replaceChildren(...values.map(r=>{
-      const row=node("div","ultra-row");const check=node("input");check.type="checkbox";
-      check.setAttribute("aria-label",`Выбрать запись ${r.name}`);check.checked=model.selected.has(r.id);
-      check.onchange=()=>{if(check.checked){if(model.selected.size>=100){check.checked=false;toast("За раз можно изменить до 100 записей");return;}model.selected.add(r.id);}else model.selected.delete(r.id);registrySelection();};
-      const copy=node("div","ultra-copy");copy.append(node("strong","",r.name),node("small","ultra-path",r.command),node("small","ultra-path",r.key));
+  function renderRegistry(scope){
+    const filter=$(`#${scope}-filter`).value;
+    const values=model[scope].filter(r=>filter==="all"||r.state===filter);
+    const offset=model.offsets[scope]=Math.min(model.offsets[scope],Math.max(0,Math.floor((values.length-1)/60)*60));
+    $(`#${scope}-list`).replaceChildren(...values.slice(offset,offset+60).map(r=>{
+      const row=node("div","ultra-row"),check=node("input");check.type="checkbox";
+      check.setAttribute("aria-label",`Выбрать запись ${r.name||"По умолчанию"}`);check.checked=model.selections[scope].has(r.id);check.disabled=scope==="registry"&&!r.removable;
+      check.onchange=()=>{if(check.checked)model.selections[scope].add(r.id);else model.selections[scope].delete(r.id);selection(scope);};
+      const copy=node("div","ultra-copy");copy.append(node("strong","",r.name||"(По умолчанию)"),node("small","",categoryNames[r.category]||""),node("small","ultra-path",r.command),node("small","ultra-path",r.key));
       row.append(check,copy,node("span",`ultra-tag ${r.state}`,labels[r.state]));return row;
-    }));if(!values.length)$("#registry-list").append(empty("В этом фильтре записей нет."));registrySelection();
+    }));
+    if(!values.length)$(`#${scope}-list`).append(empty("В этом фильтре записей нет."));
+    $(`#${scope}-page`).textContent=`${num(values.length?offset+1:0)}–${num(Math.min(offset+60,values.length))} из ${num(values.length)}`;
+    $(`#${scope}-prev`).disabled=offset===0;$(`#${scope}-next`).disabled=offset+60>=values.length;selection(scope);
   }
-  async function scanRegistry(){
-    $("#registry-meta").textContent="Проверяем записи…";
-    try{const data=await api("/api/maintenance/scan",{});model.registry=data.items;model.selected.clear();model.loadedRegistry=true;renderRegistry();$("#registry-meta").textContent=`Записей: ${num(data.items.length)} · ${data.scope} · ${new Date().toLocaleTimeString("ru-RU")}`;}
-    catch(e){$("#registry-meta").textContent="Проверка не завершена";throw e;}
+  async function scanRegistry(scope){
+    $(`#${scope}-meta`).textContent="Проверяем записи…";
+    try{const data=await api(`/api/${scope}/scan`,{});model[scope]=data.items;model.selections[scope].clear();model.offsets[scope]=0;renderRegistry(scope);$(`#${scope}-meta`).textContent=`Записей: ${num(data.items.length)} · ${data.scope}`;}
+    catch(e){$(`#${scope}-meta`).textContent="Проверка не завершена";throw e;}
   }
-  function changeRegistry(operation){
-    const values=model.registry.filter(r=>model.selected.has(r.id));if(!values.length)return;
-    const ids=values.map(r=>r.id);
-    confirm(operation==="clean"?"Убрать отсутствующие записи?":"Отключить автозагрузку?","Полное значение каждой записи сохранится в резервной копии. Отключение может убрать нужный вам компонент из автозагрузки. Восстановление доступно ниже.",values.map(r=>`${r.name} — ${r.command}`),async()=>{
-      const r=await api("/api/maintenance/apply",{ids,action:operation,confirmed:true});
-      // Show the mutation result even if a subsequent refresh fails.
-      try{await scanRegistry();await backups();}catch(e){toast(`Изменения выполнены. Обновление: ${e.message}`);}return r;
+  function changeRegistry(scope,operation,allMissing=false){
+    const values=model[scope].filter(r=>allMissing?r.removable:model.selections[scope].has(r.id));if(!values.length)return;
+    confirm(scope==="startup"?(operation==="clean"?"Удалить несуществующие пути автозагрузки?":"Отключить автозагрузку?"):"Исправить выбранные ошибки реестра?","До изменения каждого значения сохраняется точная резервная копия. Проверьте список. Восстановление доступно в обоих разделах.",values.map(r=>`${r.name||"По умолчанию"} — ${r.command}`),async()=>{
+      const r=await api(`/api/${scope}/apply`,{ids:values.map(r=>r.id),action:operation,confirmed:true});
+      try{await scanRegistry(scope);await backups();}catch(e){toast(`Изменения выполнены. Обновление: ${e.message}`);}return r;
     });
   }
-  async function backups(){
-    const d=await api("/api/maintenance/backups");
-    $("#registry-backups").replaceChildren(...d.items.map(r=>{
-      const row=node("div","ultra-row");const copy=node("div","ultra-copy");copy.append(node("strong","",r.name),node("small","ultra-path",r.command||r.key),node("small","",`${r.created} UTC · ${r.state==="restored"?"Восстановлено":r.state==="pending"?"Незавершённая операция; копия сохранена":"Резервная копия сохранена"}`));row.append(copy);
-      if(r.state!=="restored")row.append(button("Восстановить",async()=>{confirm("Восстановить запись?","Существующая другая запись не будет заменена.",[r.name,r.key],async()=>{const answer=await api("/api/maintenance/restore",{id:r.id});try{await backups();if(model.loadedRegistry)await scanRegistry();}catch(e){toast(e.message);}return answer;});}));return row;
-    }));if(!d.items.length)$("#registry-backups").append(empty("Резервные копии появятся после первого изменения."));
+  async function backups(offset=model.backupOffset){
+    const d=await api(`/api/maintenance/backups?offset=${offset}`);model.backupOffset=d.offset;
+    for(const scope of ["startup","registry"]){
+      $(`#${scope}-backups-page`).textContent=`${num(d.total?d.offset+1:0)}–${num(Math.min(d.offset+d.page_size,d.total))} из ${num(d.total)}`;
+      $(`#${scope}-backups-prev`).disabled=d.offset===0;$(`#${scope}-backups-next`).disabled=d.offset+d.page_size>=d.total;
+      const list=$(`#${scope}-backups`);list.replaceChildren(...d.items.map(r=>{
+        const row=node("div","ultra-row"),copy=node("div","ultra-copy");copy.append(node("strong","",r.name||"По умолчанию"),node("small","ultra-path",r.key),node("small","",`${r.created} UTC · ${r.state==="restored"?"Восстановлено":r.state==="pending"?"Незавершённая операция; копия сохранена":"Резервная копия сохранена"}`));row.append(copy);
+        if(r.state!=="restored")row.append(button("Восстановить",async()=>confirm("Восстановить запись?","Существующая другая запись не будет заменена.",[r.name||"По умолчанию",r.key],async()=>{const answer=await api("/api/maintenance/restore",{id:r.id});await backups();return answer;})));return row;
+      }));if(!d.items.length)list.append(empty("Резервные копии появятся после первого изменения."));
+    }
   }
   async function loadApps(){
     $("#apps-count").textContent="Читаем список…";
@@ -104,15 +112,27 @@
     $("#optimizer-errors").replaceChildren(...(d.errors||[]).map(t=>node("p","",t)));
     clearTimeout(model.optimizerTimer);if(d.state==="running")model.optimizerTimer=setTimeout(()=>optimizer().catch(e=>toast(e.message)),1000);
   }
-  $("#registry-scan").onclick=()=>action(scanRegistry);$("#registry-filter").onchange=renderRegistry;
-  $("#registry-clean").onclick=()=>changeRegistry("clean");$("#startup-disable").onclick=()=>changeRegistry("disable");$("#registry-backups-refresh").onclick=()=>action(backups);
+  for(const scope of ["startup","registry"]){
+    $(`#${scope}-scan`).onclick=()=>action(()=>scanRegistry(scope));
+    $(`#${scope}-filter`).onchange=()=>{model.offsets[scope]=0;renderRegistry(scope);};
+    $(`#${scope}-clean`).onclick=()=>changeRegistry(scope,"clean");
+    $(`#${scope}-missing`).onclick=()=>changeRegistry(scope,"clean",true);
+    $(`#${scope}-select-missing`).onclick=()=>{model.selections[scope]=new Set(model[scope].filter(r=>r.removable).map(r=>r.id));renderRegistry(scope);};
+    $(`#${scope}-clear`).onclick=()=>{model.selections[scope].clear();renderRegistry(scope);};
+    $(`#${scope}-prev`).onclick=()=>{model.offsets[scope]=Math.max(0,model.offsets[scope]-60);renderRegistry(scope);};
+    $(`#${scope}-next`).onclick=()=>{model.offsets[scope]+=60;renderRegistry(scope);};
+    $(`#${scope}-backups-refresh`).onclick=()=>action(()=>backups());
+    $(`#${scope}-backups-prev`).onclick=()=>action(()=>backups(Math.max(0,model.backupOffset-60)));
+    $(`#${scope}-backups-next`).onclick=()=>action(()=>backups(model.backupOffset+60));
+  }
+  $("#startup-disable").onclick=()=>changeRegistry("startup","disable");
   $("#apps-refresh").onclick=()=>action(loadApps);$("#apps-search").oninput=()=>{model.appOffset=0;renderApps();};
   $("#apps-prev").onclick=()=>{model.appOffset=Math.max(0,model.appOffset-50);renderApps();};$("#apps-next").onclick=()=>{model.appOffset+=50;renderApps();};
   $("#history-refresh").onclick=()=>action(history);$("#optimizer-stop").onclick=()=>action(async()=>{await api("/api/optimizer/stop",{});toast("Остановка после текущего системного вызова");});
   $("#report-export").onclick=()=>action(async()=>{
     await history();const info=await api("/api/space/status");const job=await api("/api/optimizer/status");
-    const report={application:"Cleaner Ultra",version:"0.7.0",created_at:new Date().toISOString(),disk_snapshot:info,operations:model.history,optimizer:job};
+    const report={application:"Cleaner Ultra",version:state.version||"0.8.0",created_at:new Date().toISOString(),disk_snapshot:info,operations:model.history,optimizer:job};
     const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:"application/json"}));const a=node("a");a.href=url;a.download=`CleanerUltra-report-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast("Локальный отчёт подготовлен. Он содержит пути файлов из вашего анализа.");
   });
-  window.CleanerUltraMaintenance={result,optimizer,open:async(page)=>{if(page==="maintenance")await backups();if(page==="apps"&&!model.loadedApps)await loadApps();if(page==="history")await history();if(page==="optimize")await optimizer();}};
+  window.CleanerUltraMaintenance={result,confirm,optimizer,open:async(page)=>{if(page==="registry"||page==="startup")await backups();if(page==="apps"&&!model.loadedApps)await loadApps();if(page==="history")await history();if(page==="optimize")await optimizer();}};
 })();

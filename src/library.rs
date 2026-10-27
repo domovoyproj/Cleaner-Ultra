@@ -1705,12 +1705,29 @@ impl Library {
         }
         Ok(usage.bytes)
     }
+    pub fn cache_status(&self) -> Result<Value> {
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        for entry in fs::read_dir(&self.thumbs)? {
+            let entry = entry?;
+            if owned_preview(&entry.path()) && entry.file_type()?.is_file() {
+                files += 1;
+                bytes += entry.metadata()?.len();
+            }
+        }
+        Ok(json!({"files":files,"bytes":bytes}))
+    }
+    pub fn clear_cache(&self) -> Result<Value> {
+        self.trim_cache_to(None, 0)
+    }
     pub fn trim_cache(&self) -> Result<Value> {
         self.trim_cache_except(None)
     }
     fn trim_cache_except(&self, protected: Option<&Path>) -> Result<Value> {
+        self.trim_cache_to(protected, self.settings().cache_mb * 1024 * 1024)
+    }
+    fn trim_cache_to(&self, protected: Option<&Path>, budget: u64) -> Result<Value> {
         let _guard = self.cache_trim.lock();
-        let budget = self.settings().cache_mb * 1024 * 1024;
         let mut files = Vec::new();
         let mut bytes = 0;
         let mut sizes = HashMap::new();

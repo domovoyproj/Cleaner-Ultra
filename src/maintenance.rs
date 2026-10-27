@@ -1,5 +1,5 @@
-//! Explicit, recoverable maintenance of the current user's startup registry values.
-//! No HKLM, services, COM, uninstall keys or registry trees are ever deleted.
+//! Separate, recoverable startup management and current-user registry issue repair.
+//! Only allowlisted values are changed; never delete keys, services or HKLM.
 use anyhow::{Context, Result, bail};
 use parking_lot::Mutex;
 use rusqlite::{Connection, params};
@@ -9,7 +9,88 @@ use std::{collections::HashMap, path::Path, time::Instant};
 
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_ONCE: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
-const LIMIT: usize = 100;
+const LIMIT: usize = 50000;
+const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
+const CLSID: &str = r"Software\Classes\CLSID";
+const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+fn direct_child<'a>(key: &'a str, parent: &str) -> Option<&'a str> {
+    key.strip_prefix(parent)?
+        .strip_prefix('\\')
+        .filter(|s| !s.is_empty() && !s.contains('\\'))
+}
+fn issue_category(value: &RegistryValue) -> Option<&'static str> {
+    if value.name.is_empty()
+        && direct_child(&value.key, APP_PATHS)
+            .is_some_and(|s| s.to_ascii_lowercase().ends_with(".exe"))
+    {
+        return Some("app_paths");
+    }
+    if value.name == "DisplayIcon" && direct_child(&value.key, UNINSTALL).is_some() {
+        return Some("icons");
+    }
+    if value.name.is_empty() {
+        for suffix in ["InprocServer32", "LocalServer32"] {
+            if let Some(parent) = value.key.strip_suffix(&format!("\\{suffix}")) {
+                if direct_child(parent, CLSID)
+                    .is_some_and(|s| uuid::Uuid::parse_str(s.trim_matches(['{', '}'])).is_ok())
+                {
+                    return Some(if suffix == "InprocServer32" {
+                        "com_dll"
+                    } else {
+                        "com_exe"
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+fn key_allowed(key: &str) -> bool {
+    [RUN, RUN_ONCE].contains(&key)
+        || issue_category(&RegistryValue {
+            key: key.into(),
+            name: String::new(),
+            kind: 1,
+            data: vec![],
+        })
+        .is_some()
+        || direct_child(key, UNINSTALL).is_some()
+}
+fn allowed_for(value: &RegistryValue, scope: &str) -> bool {
+    value.data.len() <= 1024 * 1024
+        && !value.name.contains('\0')
+        && value.name.len() <= 32768
+        && if scope == "startup" {
+            allowed(value)
+        } else {
+            scope == "registry" && issue_category(value).is_some()
+        }
+}
+fn issue_target(value: &RegistryValue, command: &str) -> Option<String> {
+    match issue_category(value)? {
+        "com_exe" => executable(command),
+        "app_paths" => executable(&format!("\"{}\"", command.trim().trim_matches('"'))),
+        category => {
+            let text = if category == "icons" {
+                command
+                    .rsplit_once(',')
+                    .filter(|(_, n)| n.trim().parse::<i32>().is_ok())
+                    .map(|(s, _)| s)
+                    .unwrap_or(command)
+            } else {
+                command
+            };
+            let path = text.trim().trim_matches('"');
+            // Reuse the strict absolute-path validator, allowing only known resource extensions.
+            let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();
+            if !["dll", "exe", "ico", "ocx"].contains(&extension.as_str()) {
+                return None;
+            }
+            let stem = &path[..path.len() - extension.len()];
+            executable(&format!("\"{stem}exe\"")).map(|_| path.to_owned())
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegistryValue {
     pub key: String,
@@ -19,6 +100,9 @@ pub struct RegistryValue {
 }
 pub trait Registry: Send {
     fn values(&self) -> Result<Vec<RegistryValue>>;
+    fn issue_values(&self) -> Result<Vec<RegistryValue>> {
+        Ok(Vec::new())
+    }
     fn read(&self, key: &str, name: &str) -> Result<Option<RegistryValue>>;
     fn remove(&mut self, value: &RegistryValue) -> Result<()>;
     /// Must refuse to overwrite any existing value.
@@ -33,6 +117,7 @@ struct Finding {
     target: Option<String>,
     state: String,
     removable: bool,
+    category: String,
 }
 struct Snapshot {
     created: Instant,
@@ -41,7 +126,7 @@ struct Snapshot {
 struct Inner {
     db: Connection,
     registry: Box<dyn Registry>,
-    snapshot: Option<Snapshot>,
+    snapshots: HashMap<String, Snapshot>,
 }
 pub struct Maintenance {
     inner: Mutex<Inner>,
@@ -139,7 +224,7 @@ impl Maintenance {
             inner: Mutex::new(Inner {
                 db,
                 registry,
-                snapshot: None,
+                snapshots: HashMap::new(),
             }),
         })
     }
@@ -172,16 +257,33 @@ impl Maintenance {
         Ok(json!({"items":items}))
     }
     pub fn scan(&self) -> Result<Value> {
+        self.scan_scope("startup")
+    }
+    pub fn scan_scope(&self, scope: &str) -> Result<Value> {
+        if !["startup", "registry"].contains(&scope) {
+            bail!("Неизвестный раздел");
+        }
         let mut inner = self.inner.lock();
         let mut findings = Vec::new();
         let mut values = HashMap::new();
-        for value in inner.registry.values()? {
-            if !allowed(&value) {
+        let entries = if scope == "startup" {
+            inner.registry.values()?
+        } else {
+            inner.registry.issue_values()?
+        };
+        for value in entries {
+            if !allowed_for(&value, scope) {
                 continue;
             }
             let command =
                 decode(&value).unwrap_or_else(|| "Нестроковое значение — только просмотр".into());
-            let target = decode(&value).and_then(|s| executable(&s));
+            let target = decode(&value).and_then(|s| {
+                if scope == "startup" {
+                    executable(&s)
+                } else {
+                    issue_target(&value, &s)
+                }
+            });
             let absent = target.as_deref().is_some_and(missing);
             let state = if absent {
                 "missing"
@@ -198,26 +300,42 @@ impl Maintenance {
                 target,
                 state: state.into(),
                 removable: absent,
+                category: if scope == "startup" {
+                    "startup".into()
+                } else {
+                    issue_category(&value).unwrap_or("review").into()
+                },
             };
             values.insert(finding.id.clone(), (value, finding.clone()));
             findings.push(finding);
         }
         findings.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        inner.snapshot = Some(Snapshot {
-            created: Instant::now(),
-            values,
-        });
+        inner.snapshots.insert(
+            scope.into(),
+            Snapshot {
+                created: Instant::now(),
+                values,
+            },
+        );
         Ok(
-            json!({"items":findings,"supported":cfg!(windows),"scope":"HKCU Run / RunOnce · 64-bit","expires_seconds":900}),
+            json!({"items":findings,"supported":cfg!(windows),"scope":if scope == "startup" { "HKCU Run / RunOnce · 64-bit" } else { "HKCU App Paths / COM / DisplayIcon · 64-bit" },"limit":LIMIT,"expires_seconds":900}),
         )
     }
     pub fn backups(&self) -> Result<Value> {
+        self.backups_page_size(0, 500)
+    }
+    pub fn backups_page(&self, offset: i64) -> Result<Value> {
+        self.backups_page_size(offset.max(0), 60)
+    }
+    fn backups_page_size(&self, offset: i64, page_size: i64) -> Result<Value> {
         let inner = self.inner.lock();
-        let mut q = inner.db.prepare(
-            "SELECT id,created,value,state,action FROM backups ORDER BY rowid DESC LIMIT 500",
-        )?;
+        let total: i64 = inner
+            .db
+            .query_row("SELECT COUNT(*) FROM backups", [], |r| r.get(0))?;
+        let offset = offset.min(((total - 1).max(0) / page_size) * page_size);
+        let mut q = inner.db.prepare("SELECT id,created,value,state,action FROM backups ORDER BY rowid DESC LIMIT ? OFFSET ?")?;
         let rows = q
-            .query_map([], |r| {
+            .query_map(params![page_size, offset], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -232,22 +350,31 @@ impl Maintenance {
             let value: RegistryValue = serde_json::from_str(&value)?;
             items.push(json!({"id":id,"created":created,"key":format!("HKCU\\{}",value.key),"name":value.name,"command":decode(&value),"state":state,"action":action}));
         }
-        Ok(json!({"items":items}))
+        Ok(json!({"items":items,"total":total,"offset":offset,"page_size":page_size}))
     }
     pub fn apply(&self, ids: &[String], action: &str) -> Result<Value> {
+        self.apply_scope("startup", ids, action)
+    }
+    pub fn apply_scope(&self, scope: &str, ids: &[String], action: &str) -> Result<Value> {
+        if !["startup", "registry"].contains(&scope) || (scope == "registry" && action != "clean") {
+            bail!("Недопустимая операция для раздела");
+        }
         if ids.is_empty() || ids.len() > LIMIT {
-            bail!("Выберите от 1 до 100 записей");
+            bail!("Выберите от 1 до 50 000 записей");
         }
         if !["clean", "disable"].contains(&action) {
             bail!("Неизвестная операция");
         }
         let mut inner = self.inner.lock();
         let snapshot = inner
-            .snapshot
-            .as_ref()
+            .snapshots
+            .get(scope)
             .context("Сначала выполните проверку")?;
         if snapshot.created.elapsed().as_secs() > 900 {
             bail!("Проверка устарела. Обновите список");
+        }
+        if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+            bail!("Повторяющиеся идентификаторы");
         }
         let selected = ids
             .iter()
@@ -261,7 +388,7 @@ impl Maintenance {
             .collect::<Result<Vec<_>>>()?;
         // Validate every requested id before starting the batch. Never trust client paths.
         for (value, finding) in &selected {
-            if !allowed(value) || decode(value).is_none() {
+            if !allowed_for(value, scope) || decode(value).is_none() {
                 bail!("Эту запись нельзя изменять");
             }
             if action == "clean"
@@ -272,7 +399,7 @@ impl Maintenance {
         }
         let mut done = 0;
         let mut errors = Vec::new();
-        for (value, _) in selected {
+        for (value, finding) in selected {
             let result = (|| -> Result<()> {
                 if inner.registry.read(&value.key, &value.name)?.as_ref() != Some(&value) {
                     bail!("Запись изменилась после проверки");
@@ -292,10 +419,10 @@ impl Maintenance {
                 Ok(())
             })();
             if let Err(e) = result {
-                errors.push(json!({"name":value.name,"message":e.to_string()}));
+                errors.push(json!({"id":finding.id,"name":value.name,"message":e.to_string()}));
             }
         }
-        inner.snapshot = None;
+        inner.snapshots.remove(scope);
         Ok(json!({"done":done,"errors":errors}))
     }
     pub fn restore(&self, id: &str) -> Result<Value> {
@@ -307,7 +434,9 @@ impl Maintenance {
             })
             .context("Резервная копия не найдена")?;
         let value: RegistryValue = serde_json::from_str(&raw)?;
-        if !allowed(&value) || !["pending", "removed"].contains(&state.as_str()) {
+        if !(allowed(&value) || allowed_for(&value, "registry"))
+            || !["pending", "removed"].contains(&state.as_str())
+        {
             bail!("Копия недоступна для восстановления");
         }
         match inner.registry.read(&value.key, &value.name)? {
@@ -318,7 +447,7 @@ impl Maintenance {
         inner
             .db
             .execute("UPDATE backups SET state='restored' WHERE id=?", [id])?;
-        inner.snapshot = None;
+        inner.snapshots.clear();
         Ok(json!({"restored":true}))
     }
 }
@@ -365,7 +494,7 @@ mod native {
         }
     }
     fn open(path: &str, write: bool) -> Result<Option<Key>> {
-        if ![RUN, RUN_ONCE].contains(&path) {
+        if !key_allowed(path) {
             bail!("Раздел реестра запрещён");
         }
         let mut key = null_mut();
@@ -423,6 +552,46 @@ mod native {
             data,
         }))
     }
+    fn children(path: &str) -> Result<Vec<String>> {
+        let mut handle = null_mut();
+        let code = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                wide(path).as_ptr(),
+                0,
+                KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY,
+                &mut handle,
+            )
+        };
+        if code == ERROR_FILE_NOT_FOUND {
+            return Ok(vec![]);
+        }
+        check(code)?;
+        let key = Key(handle);
+        let mut names = Vec::new();
+        for index in 0..10000 {
+            let mut name = vec![0u16; 256];
+            let mut length = name.len() as u32;
+            let code = unsafe {
+                RegEnumKeyExW(
+                    key.0,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut length,
+                    null(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            };
+            if code == ERROR_NO_MORE_ITEMS {
+                return Ok(names);
+            }
+            check(code)?;
+            names.push(String::from_utf16(&name[..length as usize])?);
+        }
+        bail!("Слишком много подразделов. Сканирование не завершено")
+    }
     impl Registry for NativeRegistry {
         fn values(&self) -> Result<Vec<RegistryValue>> {
             let mut values = Vec::new();
@@ -455,6 +624,33 @@ mod native {
                     }
                     if index == 9999 {
                         bail!("Слишком много записей автозагрузки");
+                    }
+                }
+            }
+            Ok(values)
+        }
+        fn issue_values(&self) -> Result<Vec<RegistryValue>> {
+            let mut values = Vec::new();
+            for (root, suffixes, name) in [
+                (APP_PATHS, vec![""], ""),
+                (CLSID, vec!["InprocServer32", "LocalServer32"], ""),
+                (UNINSTALL, vec![""], "DisplayIcon"),
+            ] {
+                for child in children(root)? {
+                    for suffix in &suffixes {
+                        let path = if suffix.is_empty() {
+                            format!("{root}\\{child}")
+                        } else {
+                            format!("{root}\\{child}\\{suffix}")
+                        };
+                        if !key_allowed(&path) {
+                            continue;
+                        }
+                        if let Some(key) = open(&path, false)? {
+                            if let Some(value) = read_value(&key, &path, name)? {
+                                values.push(value);
+                            }
+                        }
                     }
                 }
             }
@@ -505,6 +701,9 @@ mod tests {
         fn values(&self) -> Result<Vec<RegistryValue>> {
             Ok(self.entries.lock().clone())
         }
+        fn issue_values(&self) -> Result<Vec<RegistryValue>> {
+            Ok(self.entries.lock().clone())
+        }
         fn read(&self, k: &str, n: &str) -> Result<Option<RegistryValue>> {
             Ok(self
                 .entries
@@ -536,6 +735,123 @@ mod tests {
             .as_str()
             .unwrap()
             .into()
+    }
+    #[test]
+    fn bulk_startup_selection_and_scopes_do_not_interfere() {
+        let t = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        for i in 0..175 {
+            let mut v = value();
+            v.name = format!("own-{i}");
+            fake.entries.lock().push(v);
+        }
+        let m = Maintenance::with_registry(t.path(), Box::new(fake.clone())).unwrap();
+        let scan = m.scan().unwrap();
+        let ids = scan["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            m.scan_scope("registry").unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(m.apply_scope("registry", &ids, "clean").is_err());
+        assert!(
+            m.apply(&[ids[0].clone(), ids[0].clone()], "disable")
+                .is_err()
+        );
+        assert_eq!(fake.entries.lock().len(), 175);
+        assert_eq!(m.apply(&ids, "disable").unwrap()["done"], 175);
+        assert_eq!(
+            m.backups_page(120).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            55
+        );
+        assert_eq!(m.backups_page(120).unwrap()["total"], 175);
+        let backups = m.backups().unwrap();
+        for b in backups["items"].as_array().unwrap() {
+            m.restore(b["id"].as_str().unwrap()).unwrap();
+        }
+        assert_eq!(fake.entries.lock().len(), 175);
+    }
+    #[test]
+    fn registry_rules_validate_resource_paths_and_do_not_accept_startup_or_trees() {
+        let mut v = value();
+        v.key = format!("{APP_PATHS}\\fixture.exe");
+        v.name.clear();
+        assert_eq!(issue_category(&v), Some("app_paths"));
+        assert_eq!(
+            issue_target(&v, r"C:\Program Files\fixture.exe").as_deref(),
+            Some(r"C:\Program Files\fixture.exe")
+        );
+        v.key = format!("{CLSID}\\{{12345678-1234-1234-1234-123456789012}}\\InprocServer32");
+        assert_eq!(
+            issue_target(&v, r"C:\QA\fixture.dll").as_deref(),
+            Some(r"C:\QA\fixture.dll")
+        );
+        for command in [
+            r"%SystemRoot%\fixture.dll",
+            r"\\server\fixture.dll",
+            r"C:\QA\..\fixture.dll",
+            r"relative.dll",
+            r"C:\QA\fixture.dll:stream",
+        ] {
+            assert!(issue_target(&v, command).is_none());
+        }
+        v.key = format!("{UNINSTALL}\\fixture");
+        v.name = "DisplayIcon".into();
+        assert_eq!(
+            issue_target(&v, r#""C:\QA\fixture.dll",-1"#).as_deref(),
+            Some(r"C:\QA\fixture.dll")
+        );
+        v.name = "UninstallString".into();
+        assert!(issue_category(&v).is_none());
+        assert!(issue_category(&value()).is_none());
+        assert!(!key_allowed(r"Software\Classes"));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn registry_issue_cleanup_revalidates_and_restores_default_value() {
+        let t = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let target = t
+            .path()
+            .join("own-missing.exe")
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_owned();
+        let v = RegistryValue {
+            key: format!("{APP_PATHS}\\OwnFixture.exe"),
+            name: String::new(),
+            kind: 1,
+            data: target
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        };
+        fake.entries.lock().push(v.clone());
+        let m = Maintenance::with_registry(t.path(), Box::new(fake.clone())).unwrap();
+        let find = m.scan_scope("registry").unwrap();
+        let id = find["items"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(find["items"][0]["removable"], true);
+        std::fs::write(&target, b"own file appeared after preview").unwrap();
+        assert!(m.apply_scope("registry", &[id.clone()], "clean").is_err());
+        assert_eq!(fake.entries.lock()[0], v);
+        std::fs::remove_file(&target).unwrap();
+        assert_eq!(
+            m.apply_scope("registry", &[id], "clean").unwrap()["done"],
+            1
+        );
+        let b = m.backups().unwrap();
+        m.restore(b["items"][0]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(fake.entries.lock()[0], v);
     }
     #[test]
     fn command_parser_is_conservative() {
