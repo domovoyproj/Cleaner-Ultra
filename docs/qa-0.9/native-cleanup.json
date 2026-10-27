@@ -1,0 +1,17 @@
+{
+  "version": "0.9.0",
+  "categories_checked": [
+    "browsers",
+    "programs",
+    "user_temp"
+  ],
+  "own_files_moved": 6,
+  "own_files_restored": 6,
+  "excluded_files_kept": 2,
+  "fixture_files_verified": 145,
+  "all_fixture_hashes_preserved": true,
+  "windows_temp_requires_elevation": true,
+  "credentials_and_history_kept": true,
+  "disk_snapshot_preserved": true,
+  "user_files_deleted": 0
+}

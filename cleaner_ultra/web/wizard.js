@@ -1,9 +1,9 @@
 /* Scan -> editable server-issued findings -> explicit batch confirmation -> actual results. */
 (()=>{
   const w={plan:new CleanupPlan(),offset:0,cancel:false,running:false,scan:0,report:null,visible:[],loaded:false};
-  const kindNames={files:'Временный файл',startup:'Автозагрузка',registry:'Реестр',cache:'Кеш Cleaner Ultra',trim:'TRIM',power:'Схема питания'};
+  const kindNames={cleanup:'Кеш / TEMP',browsers:'Кеш браузеров',windows:'TEMP Windows',programs:'Кеш программ',files:'Временный файл',startup:'Автозагрузка',registry:'Реестр',cache:'Кеш Cleaner Ultra',trim:'TRIM',power:'Схема питания'};
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-  function stage(name){for(const el of $$('[data-wizard-stage]'))el.hidden=el.dataset.wizardStage!==name;$('#wizard-stop').hidden=!['scan','apply'].includes(name);}
+  function stage(name){for(const step of $$('[data-wizard-step]'))step.classList.toggle('active',step.dataset.wizardStep===(name==='apply'?'review':name));for(const el of $$('[data-wizard-stage]'))el.hidden=el.dataset.wizardStage!==name;$('#wizard-stop').hidden=!['scan','apply'].includes(name);}
   function progress(text){$('#wizard-progress').textContent=text;}
   function review(){
     const query=$('#wizard-search').value.trim().toLocaleLowerCase('ru-RU');const rows=w.plan.items.filter(r=>`${r.name} ${r.detail||''} ${kindNames[r.kind]}`.toLocaleLowerCase('ru-RU').includes(query)),summary=w.plan.summary();w.offset=Math.min(w.offset,Math.max(0,Math.floor((rows.length-1)/60)*60));
@@ -17,18 +17,17 @@
     $('#wizard-page').textContent=`${num(rows.length?w.offset+1:0)}–${num(Math.min(w.offset+60,rows.length))} из ${num(rows.length)}`;
     $('#wizard-prev').disabled=w.offset===0;$('#wizard-next').disabled=w.offset+60>=rows.length;
   }
-  async function scanFiles(){
-    const started=await api('/api/space/scan',{path:$('#wizard-path').value.trim()});w.scan=started.id;
-    for(;;){
-      const p=await api('/api/space/progress');if(p.id!==w.scan)throw Error('Другой анализ заменил снимок. Повторите мастер.');
-      progress(`Временные файлы: проверено ${num(p.files)} · ${p.current||p.root}`);
-      if(w.cancel){await api('/api/space/stop',{});throw Error('Анализ файлов остановлен.');}
-      if(p.state!=='running'){if(p.state!=='complete')throw Error(p.current||'Анализ файлов не завершён');if(p.errors)warn(`Файлы: ${num(p.errors)} ошибок доступа; недоступные файлы не включены.`);break;}await sleep(250);
+  async function scanFiles(modes){
+    const categories=modes.map(m=>m==='files'?'user_temp':m);const ids=$$('[data-cleanup-rule]:checked').filter(c=>categories.includes(c.dataset.cleanupCategory)).map(c=>c.dataset.cleanupRule);
+    if(!ids.length){warn('В выбранных категориях нет доступных каталогов. Проверьте список программ; работающие браузеры нужно закрыть.');return;}
+    const started=await api('/api/cleanup/scan',{rule_ids:ids});w.cleanupJob=started.job;
+    for(;;){const p=await api('/api/cleanup/progress');if(p.job!==w.cleanupJob)throw Error('Проверка кешей заменена. Повторите мастер.');progress(`Категории: ${p.rules_done} / ${p.rules_total} · найдено ${num(p.files)} файлов · ${p.current||''}`);
+      if(w.cancel){await api('/api/cleanup/stop',{});throw Error('Проверка кешей остановлена.');}
+      if(p.state!=='running'){for(const message of p.warnings||[])warn(message);if(p.state!=='complete')throw Error('Проверка кешей не завершена');break;}await sleep(250);
     }
-    for(let offset=0;;){
-      const d=await api(`/api/space/files?mode=temporary&offset=${offset}`);if(d.scan!==w.scan)throw Error('Снимок файлов изменился');
-      for(const f of d.files)w.plan.add({kind:'files',id:f.id,name:basename(f.path),detail:f.path,size:f.size,scan:w.scan});
-      offset+=d.files.length;if(offset>=d.total||!d.files.length)break;if(w.cancel)break;
+    for(let offset=0;;){const d=await api(`/api/cleanup/files?offset=${offset}`);if(d.job!==w.cleanupJob)throw Error('Список кешей изменился');
+      for(const f of d.files)w.plan.add({kind:'cleanup',id:f.id,name:basename(f.path),detail:`${f.label}\n${f.path}`,size:f.size});offset+=d.files.length;
+      if(offset>=d.total||!d.files.length)break;if(w.cancel)break;
     }
   }
   function warn(text){$('#wizard-warnings').append(node('p','ultra-errors',text));}
@@ -37,10 +36,11 @@
     if(modes.includes('trim')&&!$$('[data-wizard-drive]:checked').length)throw Error('Выберите том для TRIM.');
     w.plan=new CleanupPlan();w.offset=0;w.cancel=false;w.report=null;w.running=true;$('#wizard-warnings').replaceChildren();stage('scan');
     try{
-      for(const mode of modes){
+      const fileModes=modes.filter(m=>['files','browsers','windows','programs'].includes(m));
+      if(fileModes.length)try{await scanFiles(fileModes);}catch(e){warn(e.message);}
+      for(const mode of modes.filter(m=>!fileModes.includes(m))){
         if(w.cancel)break;progress(`Проверка: ${kindNames[mode]||mode}`);
         try{
-          if(mode==='files')await scanFiles();
           if(mode==='startup'||mode==='registry'){
             const d=await api(`/api/${mode}/scan`,{});for(const r of d.items.filter(r=>r.removable))w.plan.add({kind:mode,id:r.id,name:r.name||'(По умолчанию)',detail:`${r.key}\n${r.command}`});
           }
@@ -53,6 +53,7 @@
   }
   async function runOperation(op){
     const ids=op.items.map(r=>r.id);
+    if(op.kind==='cleanup')return api('/api/cleanup/apply',{ids,confirmed:true});
     if(op.kind==='files')return api('/api/space/trash',{ids,scan:op.items[0].scan});
     if(['startup','registry'].includes(op.kind))return api(`/api/${op.kind}/apply`,{ids,action:'clean',confirmed:true});
     if(op.kind==='cache'){const d=await api('/api/cache',{all:true,confirmed:true});return {...d,done:d.removed};}
@@ -79,8 +80,7 @@
     });
   }
   async function open(){
-    if(w.loaded)return;w.loaded=true;
-    try{const d=await api('/api/cleanup/defaults');$('#wizard-path').value=d.temporary_path;}catch(e){toast(e.message);}
+    await window.CleanerUltraCleanup.catalog();if(w.loaded)return;w.loaded=true;stage('modes');
     try{const d=await api('/api/power');$('#wizard-power').replaceChildren(...d.plans.map(p=>{const o=node('option','',p.name);o.value=p.id;o.selected=p.id===d.active;return o;}));}catch(e){$('#wizard-power').disabled=true;}
     const info=await api('/api/space/status');$('#wizard-drives').replaceChildren(...info.drives.map(d=>{const label=node('label','wizard-drive'),c=node('input');c.type='checkbox';c.dataset.wizardDrive=d.path.slice(0,2);label.append(c,document.createTextNode(d.path));return label;}));
   }
@@ -90,7 +90,6 @@
   $('#wizard-prev').onclick=()=>{w.offset=Math.max(0,w.offset-60);review();};$('#wizard-next').onclick=()=>{w.offset+=60;review();};
   $('#wizard-edit-modes').onclick=()=>stage('modes');$('#wizard-new').onclick=()=>stage('modes');$('#wizard-review-again').onclick=()=>{stage('review');review();};
   $('#wizard-stop').onclick=()=>{w.cancel=true;$('#wizard-progress').textContent='Остановка после текущей проверки / системного вызова…';};
-  $('#wizard-browse').onclick=()=>action(async()=>{const d=await api('/api/pick',{});if(d.path)$('#wizard-path').value=d.path;});
   $('#wizard-report').onclick=()=>{if(!w.report)return;const url=URL.createObjectURL(new Blob([JSON.stringify(w.report,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download=`CleanerUltra-session-${Date.now()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
   window.CleanerUltraWizard={open};
 })();

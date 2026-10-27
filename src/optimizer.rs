@@ -99,17 +99,36 @@ impl Optimizer {
         analyze: bool,
         paths: Vec<String>,
     ) -> Result<Value> {
+        self.start_paths(
+            drive,
+            analyze,
+            paths.len() as u64,
+            Box::new(paths.into_iter().map(Ok)),
+        )
+    }
+    pub fn start_snapshot(
+        self: &Arc<Self>,
+        drive: &str,
+        analyze: bool,
+        paths: crate::space::OptimizationPaths,
+    ) -> Result<Value> {
+        self.start_paths(drive, analyze, paths.total, Box::new(paths))
+    }
+    fn start_paths(
+        self: &Arc<Self>,
+        drive: &str,
+        analyze: bool,
+        total: u64,
+        paths: Box<dyn Iterator<Item = Result<String>> + Send>,
+    ) -> Result<Value> {
         if drive.len() != 2
             || !drive.as_bytes()[0].is_ascii_alphabetic()
             || drive.as_bytes()[1] != b':'
         {
             bail!("Выберите локальный диск");
         }
-        if paths.is_empty() {
+        if total == 0 {
             bail!("Сначала проанализируйте диск или папку на этом диске");
-        }
-        if paths.len() > 50000 {
-            bail!("Выберите папку с числом файлов до 50 000");
         }
         let mut progress = self.progress.lock();
         if progress.state == "running" {
@@ -125,7 +144,7 @@ impl Optimizer {
             state: "running".into(),
             mode: if analyze { "analyze" } else { "defragment" }.into(),
             drive: drive.clone(),
-            total: paths.len() as u64,
+            total,
             ..Default::default()
         };
         self.cancel.store(false, Ordering::Release);
@@ -138,6 +157,14 @@ impl Optimizer {
                 if this.cancel.load(Ordering::Acquire) {
                     break;
                 }
+                let path = match path {
+                    Ok(p) => p,
+                    Err(e) => {
+                        this.progress.lock().errors.push(format!("Снимок: {e}"));
+                        fatal = true;
+                        break;
+                    }
+                };
                 this.progress.lock().current = path.clone();
                 let result = device.process(&path, !analyze, &this.cancel);
                 let mut p = this.progress.lock();

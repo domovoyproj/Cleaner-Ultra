@@ -36,6 +36,10 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
     assert_eq!(session["version"], env!("CARGO_PKG_VERSION"));
     for path in [
         "/api/maintenance/scan",
+        "/api/cleanup/scan",
+        "/api/cleanup/stop",
+        "/api/cleanup/apply",
+        "/api/cleanup/restore",
         "/api/startup/scan",
         "/api/registry/scan",
         "/api/startup/apply",
@@ -54,6 +58,8 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
         "/api/startup/apply",
         "/api/registry/apply",
         "/api/power/apply",
+        "/api/cleanup/apply",
+        "/api/cleanup/restore",
         "/api/apps/uninstall",
         "/api/space/optimize",
     ] {
@@ -93,6 +99,13 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
         "/maintenance.js",
         "/maintenance.css",
         "/wizard.js",
+        "/cleanup-ui.js",
+        "/disk-tree.js",
+        "/design09.css",
+        "/api/cleanup/catalog",
+        "/api/cleanup/progress",
+        "/api/cleanup/files",
+        "/api/cleanup/trash",
         "/cleanup-plan.js",
         "/performance.js",
         "/api/cache/status",
@@ -108,6 +121,9 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
     assert!(html.contains("data-page=\"startup\""));
     assert!(html.contains("Ускорить и очистить"));
     assert!(html.contains("Удаление программ"));
+    assert!(html.contains("Дерево диска"));
+    assert!(html.contains("Кеш браузеров"));
+    assert!(html.contains("Временные файлы Windows"));
     assert!(html.contains("Cleaner Ultra"));
     assert!(!html.contains("PhotoSort"));
     // The preview directory belongs to this fixture; no user data is touched.

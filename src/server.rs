@@ -17,6 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
     let space = crate::space::Space::open(&library.data)?;
+    let cleaner = crate::cleaner::Cleaner::open(&library.data)?;
     let maintenance = Arc::new(crate::maintenance::Maintenance::open(&library.data)?);
     let server =
         Arc::new(Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!(e.to_string()))?);
@@ -37,6 +38,7 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
         let host = host.clone();
         let streams = streams.clone();
         let space = space.clone();
+        let cleaner = cleaner.clone();
         let maintenance = maintenance.clone();
         let apps = apps.clone();
         let optimizer = optimizer.clone();
@@ -45,6 +47,7 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
                 if library.is_closed() {
                     optimizer.stop();
                     space.close();
+                    cleaner.close();
                     break;
                 }
                 let mut request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -100,6 +103,7 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
                 let result = route(
                     &library,
                     &space,
+                    &cleaner,
                     &maintenance,
                     &apps,
                     &optimizer,
@@ -264,6 +268,7 @@ impl<T> ContextOption<T> for Option<T> {
 fn route(
     library: &Arc<Library>,
     space: &Arc<crate::space::Space>,
+    cleaner: &Arc<crate::cleaner::Cleaner>,
     maintenance: &crate::maintenance::Maintenance,
     apps: &crate::apps::Apps,
     optimizer: &Arc<crate::optimizer::Optimizer>,
@@ -277,6 +282,12 @@ fn route(
     let get = |name: &str, default: &str| parameters.get(name).cloned().unwrap_or(default.into());
     let mut value = if *request.method() == Method::Get {
         match path {
+            "/api/cleanup/catalog" => cleaner.catalog(),
+            "/api/cleanup/progress" => cleaner.status(),
+            "/api/cleanup/files" => cleaner.files(get("offset", "0").parse().unwrap_or(0))?,
+            "/api/cleanup/trash" => {
+                cleaner.trash(&get("rule_id", ""), get("offset", "0").parse().unwrap_or(0))?
+            }
             "/api/performance" => crate::performance::resources()?,
             "/api/power" => crate::performance::power()?,
             "/api/cleanup/defaults" => {
@@ -292,6 +303,15 @@ fn route(
             "/api/space/status" => {
                 let mut info = space.status()?;
                 info["theme"] = json!(library.settings().theme);
+                info["cleanup_trash_files"] = json!(
+                    cleaner.trash("", 0)?["groups"]
+                        .as_array()
+                        .map(|g| g
+                            .iter()
+                            .map(|r| r["total"].as_u64().unwrap_or(0))
+                            .sum::<u64>())
+                        .unwrap_or(0)
+                );
                 info
             }
             "/api/space/progress" => serde_json::to_value(space.progress.lock().clone())?,
@@ -338,6 +358,24 @@ fn route(
                     "text/html; charset=utf-8".into(),
                 ));
             }
+            "/optimizer-ui.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/optimizer-ui.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/disk-tree.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/disk-tree.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/cleanup-ui.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/cleanup-ui.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
             "/wizard.js" => {
                 return Ok((
                     include_bytes!("../cleaner_ultra/web/wizard.js").to_vec(),
@@ -365,6 +403,12 @@ fn route(
             "/maintenance.css" => {
                 return Ok((
                     include_bytes!("../cleaner_ultra/web/maintenance.css").to_vec(),
+                    "text/css; charset=utf-8".into(),
+                ));
+            }
+            "/design09.css" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/design09.css").to_vec(),
                     "text/css; charset=utf-8".into(),
                 ));
             }
@@ -482,6 +526,45 @@ fn route(
         };
         let body: Value = serde_json::from_slice(if bytes.is_empty() { b"{}" } else { &bytes })?;
         match path {
+            "/api/cleanup/scan" => {
+                let ids = body["rule_ids"]
+                    .as_array()
+                    .context_or("Выберите категории")?
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .context_or("Неверная категория")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                cleaner.scan_excluding(&ids, &space.exclusions()?)?
+            }
+            "/api/cleanup/stop" => cleaner.stop(),
+            "/api/cleanup/apply" => {
+                if body["confirmed"].as_bool() != Some(true) {
+                    bail!("Подтвердите список очистки");
+                }
+                let ids = body["ids"]
+                    .as_array()
+                    .context_or("Выберите файлы")?
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .context_or("Неверный идентификатор")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                cleaner.apply_excluding(&ids, &space.exclusions()?)?
+            }
+            "/api/cleanup/restore" => {
+                if body["confirmed"].as_bool() != Some(true) {
+                    bail!("Подтвердите восстановление");
+                }
+                cleaner.restore(
+                    body["rule_id"].as_str().context_or("Выберите категорию")?,
+                    &ids(&body)?,
+                )?
+            }
             "/api/maintenance/scan" | "/api/startup/scan" => maintenance.scan()?,
             "/api/registry/scan" => maintenance.scan_scope("registry")?,
             "/api/power/apply" => {
@@ -575,10 +658,10 @@ fn route(
                 if body["mode"].as_str() == Some("trim") {
                     optimizer.start_trim(drive)?
                 } else {
-                    optimizer.start(
+                    optimizer.start_snapshot(
                         drive,
                         body["analyze"].as_bool().unwrap_or(true),
-                        space.optimization_paths(drive)?,
+                        space.optimization_stream(drive)?,
                     )?
                 }
             }
@@ -688,6 +771,8 @@ fn route(
     if *request.method() == Method::Post
         && [
             "/api/space/trash",
+            "/api/cleanup/apply",
+            "/api/cleanup/restore",
             "/api/space/restore",
             "/api/maintenance/apply",
             "/api/startup/apply",

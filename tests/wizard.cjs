@@ -5,16 +5,16 @@ function harness({partial=false}={}){
  const $=id=>{if(!elements.has(id))elements.set(id,node('div'));return elements.get(id);};
  const modes=['files','startup','registry'].map(mode=>({dataset:{wizardMode:mode}}));
  const stages=['modes','scan','review','apply','done'].map(name=>({dataset:{wizardStage:name}}));
- const $$=selector=>selector==='[data-wizard-mode]:checked'?modes:selector==='[data-wizard-stage]'?stages:[];
+ const $$=selector=>selector==='[data-wizard-mode]:checked'?modes:selector==='[data-cleanup-rule]:checked'?[{dataset:{cleanupRule:'own-rule',cleanupCategory:'user_temp'}}]:selector==='[data-wizard-stage]'?stages:[];
  $('#wizard-path').value='C:\\own-temp';
  const api=async(path,body)=>{
   calls.push({path,body});
-  if(path==='/api/space/scan')return {id:8};if(path==='/api/space/progress')return {id:8,state:'complete',files:2};
-  if(path.startsWith('/api/space/files?'))return {scan:8,total:2,files:[{id:1,path:'C:\\own-temp\\keep.tmp',size:10},{id:2,path:'C:\\own-temp\\remove.tmp',size:20}]};
+  if(path==='/api/cleanup/scan')return {job:'own-job'};if(path==='/api/cleanup/progress')return {job:'own-job',state:'complete',files:2,rules_done:1,rules_total:1};
+  if(path.startsWith('/api/cleanup/files?'))return {job:'own-job',total:2,files:[{id:1,path:'C:\\own-temp\\keep.tmp',size:10},{id:2,path:'C:\\own-temp\\remove.tmp',size:20}]};
   if(path==='/api/startup/scan')return {items:[{id:'own-startup',name:'own startup',key:'HKCU\\own',command:'own.exe',removable:true},{id:'present',name:'existing',removable:false}]};
   if(path==='/api/registry/scan')return {items:[{id:'own-registry',name:'own registry',key:'HKCU\\own',command:'own.dll',removable:true}]};
   assert.equal(dialogOpen,false,'confirmation must close before lengthy mutations');
-  if(path==='/api/space/trash')return partial?{done:1,moved_bytes:10,freed_bytes:0,errors:[{id:2,message:'file changed'}]}:{done:body.ids.length,moved_bytes:20,freed_bytes:0,errors:[]};
+  if(path==='/api/cleanup/apply')return partial?{done:1,moved_bytes:10,freed_bytes:0,errors:[{id:2,message:'file changed'}]}:{done:body.ids.length,moved_bytes:20,freed_bytes:0,errors:[]};
   if(path==='/api/registry/apply'&&partial)throw Error('snapshot changed');
   return {done:body.ids.length,errors:[]};
  };
@@ -26,8 +26,8 @@ test('wizard scans without writes, then applies only the edited selection after 
  const h=harness();await h.$('#wizard-scan').onclick();assert.equal(h.calls.filter(c=>c.path.includes('apply')||c.path.includes('trash')).length,0);
  h.$('#wizard-select-none').onclick();assert.equal(h.$('#wizard-apply').disabled,true);
  const row=h.$('#wizard-list').children.find(r=>r.children[0]?.attrs['aria-label']==='Включить remove.tmp');row.children[0].checked=true;row.children[0].onchange();
- await h.$('#wizard-apply').onclick();assert.equal(h.confirm().items.length,1);assert.equal(h.calls.filter(c=>c.path==='/api/space/trash').length,0);
- const result=await h.confirm().run();assert.equal(result.done,1);assert.deepEqual(JSON.parse(JSON.stringify(h.calls.find(c=>c.path==='/api/space/trash').body.ids)),[2]);assert.ok(!h.calls.some(c=>c.path.endsWith('/apply')));assert.equal(h.stages.find(s=>s.dataset.wizardStage==='done').hidden,false);
+ await h.$('#wizard-apply').onclick();assert.equal(h.confirm().items.length,1);assert.equal(h.calls.filter(c=>c.path==='/api/cleanup/apply').length,0);
+ const result=await h.confirm().run();assert.equal(result.done,1);assert.deepEqual(JSON.parse(JSON.stringify(h.calls.find(c=>c.path==='/api/cleanup/apply').body.ids)),[2]);assert.ok(!h.calls.some(c=>['/api/registry/apply','/api/startup/apply'].includes(c.path)));assert.equal(h.stages.find(s=>s.dataset.wizardStage==='done').hidden,false);
 });
 test('wizard filtered select-all excludes hidden rows and partial failures remain visible',async()=>{
  const h=harness({partial:true});await h.$('#wizard-scan').onclick();h.$('#wizard-select-none').onclick();h.$('#wizard-search').value='registry';h.$('#wizard-search').oninput();h.$('#wizard-select-all').onclick();await h.$('#wizard-apply').onclick();assert.equal(h.confirm().items.length,1);

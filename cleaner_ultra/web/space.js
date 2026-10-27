@@ -1,6 +1,6 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const names = {startup:"Автозагрузка",registry:"Реестр",wizard:"Ускорить и очистить",performance:"Производительность",apps:"Удаление программ",history:"История и отчёты",overview:"Обзор",map:"Карта диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Оптимизация дисков",trash:"Корзина"};
+const names = {startup:"Автозагрузка",registry:"Реестр",wizard:"Ускорить и очистить",performance:"Производительность",apps:"Удаление программ",history:"История и отчёты",overview:"Обзор",map:"Дерево диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Оптимизация дисков",trash:"Корзина"};
 const categories = {photos:"Изображения",video:"Видео",audio:"Аудио",archives:"Архивы и образы",documents:"Документы",apps:"Приложения",other:"Другое"};
 const headings = {
   startup:["БЫСТРЕЕ К РАБОТЕ","Порядок<br>в запуске<span>.</span>","Программы при входе в Windows. Уберите несуществующие пути или отключите выбранные."],
@@ -10,7 +10,7 @@ const headings = {
   apps:["ТОЛЬКО НУЖНЫЕ ПРОГРАММЫ","Меньше лишнего.<br>Больше места<span>.</span>","Найдите приложение и запустите его штатное удаление."],
   history:["ПОНЯТНЫЙ РЕЗУЛЬТАТ","Что изменилось<span>.</span>","История операций, подробные итоги и локальные отчёты."],
   overview:["ПРОСТРАНСТВО ДЛЯ ВАЖНОГО","Место под вашим<br>контролем<span>.</span>","Узнайте, что занимает диск. Оставьте только нужное."],
-  map:["УВИДЕТЬ БОЛЬШЕ","Карта пространства<span>.</span>","Увидеть объём. Найти лишнее. Сохранить важное."],
+  map:["УВИДЕТЬ БОЛЬШЕ","Диск по ветвям<span>.</span>","Раскройте папки. Сравните объёмы. Оставьте важное."],
   large:["ВЕСОМЫЕ ПРИЧИНЫ ДЛЯ ПОРЯДКА","Большие файлы.<br>Большие возможности<span>.</span>","Самое объёмное — в начале списка. Каждый файл под вашим контролем."],
   cleanup:["ОСТАВИТЬ НУЖНОЕ","Свободнее диск.<br>Легче работать<span>.</span>","Проверьте кандидатов и выберите подходящий способ очистки."],
   optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Дефрагментация HDD и TRIM свободных блоков SSD внутри приложения."],
@@ -37,6 +37,7 @@ function progress(p) {
   $("#scan-button").disabled=state.running;
   $("#choose-folder").disabled=state.running;
   exclusionControls();
+  updateOptimizerAvailability(p);
   $("#scan-label").textContent="Анализируем пространство";
   $("#scan-current").textContent=p.current||p.root;
   $("#scan-counts").textContent=`Файлов: ${num(p.files)} · ${bytes(p.bytes)}`;
@@ -79,11 +80,11 @@ async function refresh() {
   $("#admin-button").title=info.administrator?"Приложение уже запущено с повышенными правами":!desktop?"Повышение прав доступно в настольном приложении":state.running?"Сначала остановите текущий анализ":"Перезапустить с правами администратора";
   $("#large-bytes").textContent=state.scan?bytes(info.large.bytes):"—";
   $("#large-count").textContent=state.scan?`От 100 МБ: ${num(info.large.files)} · без системных`:"Файлы от 100 МБ";
-  $("#temp-bytes").textContent=state.scan?bytes(info.temporary.bytes):"—";
+  $("#temp-bytes").textContent="Проверить";
   $("#cleanup-temp").textContent=state.scan?bytes(info.temporary.bytes):"—";
   $("#cleanup-large").textContent=state.scan?bytes(info.large.bytes):"—";
   $("#cleanup-count").textContent=num(info.temporary.files);
-  $("#trash-count").textContent=num(info.trash.files);
+  $("#trash-count").textContent=num(info.trash.files+(info.cleanup_trash_files||0));
   if(state.scan){$("#opportunity-title").textContent=info.large.files?`${bytes(info.large.bytes)} для внимательного взгляда.`:"Пространство стало понятнее.";$("#opportunity-copy").textContent=info.large.files?`Крупных файлов вне системных папок: ${num(info.large.files)}. Посмотрите, что ещё нужно, а с чем пора расстаться.`:"Откройте карту папок или системную очистку, чтобы выбрать следующий шаг.";}
   renderCategories(info.categories);
   renderOptimizer(info.drives);
@@ -112,10 +113,11 @@ async function go(page,options={}) {
   const [eyebrow,title,description]=headings[page];$("#page-eyebrow").textContent=eyebrow;$("#page-title").innerHTML=title;$("#page-description").textContent=description;
   if(page==="large"){if(state.mode==="temporary"){$("#page-title").textContent="Временное — на проверку.";$("#page-description").textContent="Файлы TEMP старше 7 дней. Ничего не выбрано заранее.";}await loadFiles();}
   if(page==="map")await loadMap();
-  if(page==="trash")await loadTrash();
+  if(page==="trash"){await loadTrash();await window.CleanerUltraCleanup?.trash();}
   if(page==="wizard")await window.CleanerUltraWizard?.open();
   if(page==="performance")await window.CleanerUltraPerformance?.open();else window.CleanerUltraPerformance?.close();
   if(window.CleanerUltraMaintenance)await window.CleanerUltraMaintenance.open(page);
+  $('[data-section="cleanup-recovery"]').hidden=page!=="trash";
   window.scrollTo({top:0,behavior:"instant"});
 }
 $$("[data-page]").forEach(b=>b.onclick=()=>action(()=>go(b.dataset.page)));
@@ -218,15 +220,15 @@ async function loadMap() {
   $("#map-list-range").textContent=d.total?`${num(d.offset+1)}–${num(Math.min(d.total,d.offset+60))} из ${num(d.total)}`:"Нет элементов";
   $("#map-list-page").textContent=String(Math.floor(d.offset/60)+1).padStart(2,"0");
   $("#folder-previous").disabled=d.offset===0;$("#folder-next").disabled=d.offset+60>=d.total;$("#map-files").disabled=!state.scan;
-  $("#map-caption").textContent=d.remainder.count?`На карте: 120 крупнейших + остальные ${num(d.remainder.count)}`:"Площадь блока соответствует размеру";
-  renderTreemap();renderInspector();
+  $("#map-caption").textContent="Стрелка — раскрыть папку · размер — логический объём";
+  await window.CleanerUltraTree?.load(d);renderInspector();
 }
 function percent(value,total){return total?`${(value/total*100).toLocaleString("ru-RU",{maximumFractionDigits:1})}%`:"0%";}
 function selectMap(f){mapView.selected=f;renderInspector();highlightMap();}
 function highlightMap(){for(const el of $$(".map-block,.map-row"))el.classList.toggle("selected",el.dataset.path===mapView.selected?.path);}
 function renderInspector(){
   const box=$("#map-inspector"),f=mapView.selected,d=mapView.data;box.replaceChildren();
-  if(!f){const mark=node("span","inspector-mark");mark.append(svg("cursor"));box.append(mark,node("p","eyebrow","ВЫБЕРИТЕ ЭЛЕМЕНТ"),node("h2","","Что занимает место?"),node("p","","Нажмите на блок или строку списка. Здесь появятся размер, расположение и действия."));const hint=node("div","inspector-hint");hint.append(svg("folder"),node("span","","Двойной щелчок по папке открывает её содержимое."));box.append(hint);return;}
+  if(!f){const mark=node("span","inspector-mark");mark.append(svg("cursor"));box.append(mark,node("p","eyebrow","ВЫБЕРИТЕ ЭЛЕМЕНТ"),node("h2","","Что занимает место?"),node("p","","Выберите файл или папку в дереве. Здесь появятся размер, расположение и действия."));const hint=node("div","inspector-hint");hint.append(svg("folder"),node("span","","Стрелка слева раскрывает ветвь. Двойной щелчок также раскрывает папку."));box.append(hint);return;}
   const mark=node("span","inspector-mark");mark.append(svg(f.remainder?"grid":mapIcon(f)));box.append(mark,node("p","eyebrow",f.remainder?"ОСТАЛЬНЫЕ ЭЛЕМЕНТЫ":f.kind==="folder"?"ПАПКА":"ФАЙЛ"),node("h2","",f.remainder?"Мелкие элементы":basename(f.path)),node("strong","inspector-size",bytes(f.bytes)));
   const details=node("dl","inspector-details");for(const [label,value] of [["Доля папки",percent(f.bytes,d.bytes)],[f.remainder?"Элементов":"Файлов",num(f.files)]])details.append(node("dt","",label),node("dd","",value));box.append(details);
   if(f.remainder){box.append(node("p","","Объединены, чтобы сохранить точные пропорции карты. Каждый элемент доступен в списке ниже."));const b=node("button","button secondary","Показать в списке");b.onclick=()=>action(async()=>{document.body.classList.remove("map-focus");$("#map-focus").setAttribute("aria-label","Развернуть карту");state.mapOffset=120;await loadMap();$("#folder-list").scrollIntoView({behavior:"smooth",block:"start"});});box.append(b);return;}
@@ -268,20 +270,31 @@ async function loadTrash() {
 }
 $("#trash-previous").onclick=()=>action(async()=>{state.trashOffset=Math.max(0,state.trashOffset-60);await loadTrash();});
 $("#trash-next").onclick=()=>action(async()=>{state.trashOffset+=60;await loadTrash();});
+function updateOptimizerAvailability(p){
+  const note=$("#optimizer-scan-note");if(note)note.textContent=p.state==="running"?`Сканирование пространства: ${p.root} · ${num(p.files)} файлов. Проверка фрагментации станет доступна после завершения. Это отдельная операция.`:p.state==="complete"?`Снимок готов: ${p.root} · ${num(p.files)} файлов. Можно проверить фрагментацию этого диска.`:"Сначала нажмите «Сканировать диск». Неполный снимок не используется для оптимизации.";
+  for(const b of $$('[data-fragment-drive]')){b.disabled=p.state!=="complete"||p.root?.slice(0,2).toUpperCase()!==b.dataset.fragmentDrive.toUpperCase();b.title=b.disabled?'Нужен завершённый снимок выбранного диска':'';}
+  for(const b of $$('[data-disk-scan]'))b.disabled=p.state==='running';
+}
 function renderOptimizer(drives) {
-  $("#optimizer-drives").replaceChildren(...drives.filter(d=>d.optimizable).map(d=>{const r=node("div","optimizer-row");const copy=node("div","drive-name");copy.append(node("strong","",`Локальный диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно из ${bytes(d.total)} · тип носителя определит Windows`));const a=node("button","button secondary","Анализировать");a.onclick=()=>openOptimize(d,true);const b=node("button","button primary","Оптимизировать ↗");b.onclick=()=>openOptimize(d,false);const trim=node("button","button secondary","TRIM SSD");trim.onclick=()=>openTrim(d);r.append(node("span","","▱"),copy,a,b,trim);return r;}));if(!drives.some(d=>d.optimizable))$("#optimizer-drives").append(empty("Нет доступных локальных дисков для оптимизации."));
+  $("#optimizer-drives").replaceChildren(...drives.filter(d=>d.optimizable).map(d=>{
+    const r=node("div","optimizer-row"),copy=node("div","drive-name");copy.append(node("strong","",`Локальный диск ${d.path.slice(0,2)}`),node("small","",`${bytes(d.free)} свободно из ${bytes(d.total)}`));
+    const scan=node("button","button secondary","Сканировать диск");scan.dataset.diskScan=d.path;scan.onclick=()=>action(async()=>{await api('/api/space/scan',{path:d.path});await refresh();toast('Сканирование запущено. Прогресс показан над списком дисков.');});
+    const analyze=node("button","button secondary","Фрагментация");analyze.dataset.fragmentDrive=d.path.slice(0,2);analyze.onclick=()=>openOptimize(d,true);
+    const defrag=node("button","button primary","Дефрагментация");defrag.dataset.fragmentDrive=d.path.slice(0,2);defrag.onclick=()=>openOptimize(d,false);
+    const trim=node("button","button secondary","TRIM SSD");trim.onclick=()=>openTrim(d);r.append(svg('drive'),copy,scan,analyze,defrag,trim);return r;
+  }));updateOptimizerAvailability(state.info?.progress||{});
 }
 function openOptimize(drive,analyze){
   $("#optimize-note").textContent="Для доступа к тому нужны права администратора. Остановка завершает обработку после текущего системного вызова.";
   $("#optimize-title").textContent=`${analyze?"Проверить фрагментацию":"Дефрагментировать"} ${drive.path.slice(0,2)}?`;
   $("#optimize-description").textContent=analyze?"Cleaner Ultra прочитает карту экстентов файлов из завершённого снимка анализа выбранного диска. Содержимое файлов не изменяется.":"Встроенный движок переместит кластеры доступных файлов HDD средствами ядра Windows и сверит SHA-256. SSD, системные, занятые и неподдерживаемые файлы пропускаются.";
-  $("#confirm-optimize").onclick=()=>action(async()=>{await api("/api/space/optimize",{drive:drive.path.slice(0,2),analyze,confirmed:true});$("#optimize-dialog").close();await window.CleanerUltraMaintenance?.optimizer();toast("Операция запущена внутри Cleaner Ultra");});$("#optimize-dialog").showModal();
+  $("#confirm-optimize").onclick=()=>window.CleanerUltraOptimizerStart({drive:drive.path.slice(0,2),analyze});$("#optimize-dialog").showModal();
 }
 function openTrim(drive){
   $("#optimize-note").textContent="Нужны права администратора. После запуска ReTrim отмена недоступна. Закрытие этого диалога до запуска ничего не изменяет.";
   $("#optimize-title").textContent=`Выполнить TRIM ${drive.path.slice(0,2)}?`;
   $("#optimize-description").textContent="Cleaner Ultra обратится напрямую к Windows Storage API. Windows обработает свободные блоки тома; содержимое существующих файлов не удаляется. После запуска ReTrim нельзя прервать. Дождитесь итогового результата в приложении.";
-  $("#confirm-optimize").onclick=()=>action(async()=>{await api("/api/space/optimize",{drive:drive.path.slice(0,2),mode:"trim",confirmed:true});$("#optimize-dialog").close();await window.CleanerUltraMaintenance?.optimizer();toast("Windows выполняет ReTrim. Ожидайте завершения.");});$("#optimize-dialog").showModal();
+  $("#confirm-optimize").onclick=()=>window.CleanerUltraOptimizerStart({drive:drive.path.slice(0,2),mode:"trim"});$("#optimize-dialog").showModal();
 }
 $$("[data-system]").forEach(b=>b.onclick=()=>action(async()=>{await api("/api/space/system",{page:b.dataset.system});toast("Открыт системный инструмент Windows");}));
 const desktop=Boolean(window.__CLEANER_ULTRA_DESKTOP__&&window.ipc?.postMessage);

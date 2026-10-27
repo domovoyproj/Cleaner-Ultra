@@ -7,11 +7,11 @@
     select(key,value){const item=this.items.find(r=>r.key===key);if(item)item.selected=!!value;}
     selectAll(value,kind){for(const item of this.items)if(!kind||item.kind===kind)item.selected=!!value;}
     selected(){return this.items.filter(r=>r.selected);}
-    summary(){const rows=this.selected();return {count:rows.length,file_count:rows.filter(r=>r.kind==='files').length,file_bytes:rows.filter(r=>r.kind==='files').reduce((n,r)=>n+(r.size||0),0),registry_count:rows.filter(r=>['startup','registry'].includes(r.kind)).length};}
+    summary(){const rows=this.selected();return {count:rows.length,file_count:rows.filter(r=>['files','cleanup'].includes(r.kind)).length,file_bytes:rows.filter(r=>['files','cleanup'].includes(r.kind)).reduce((n,r)=>n+(r.size||0),0),registry_count:rows.filter(r=>['startup','registry'].includes(r.kind)).length};}
     operations(){
       const rows=this.selected(),operations=[];
-      for(const kind of ['files','startup','registry','cache','power','trim']){
-        const items=rows.filter(r=>r.kind===kind),size=kind==='files'?500:kind==='startup'||kind==='registry'?50000:1;
+      for(const kind of ['cleanup','files','startup','registry','cache','power','trim']){
+        const items=rows.filter(r=>r.kind===kind),size=['files','cleanup'].includes(kind)?500:kind==='startup'||kind==='registry'?50000:1;
         for(let i=0;i<items.length;i+=size)operations.push({kind,items:items.slice(i,i+size)});
       }
       return operations;

@@ -10,11 +10,11 @@ if (-not $Toolchain -and (Test-Path '.cleaner_ultra\tools\mingw\mingw64\bin\gcc.
     $env:PATH = (Join-Path (Get-Location).Path '.cleaner_ultra\tools\mingw\mingw64\bin') + ';' + $env:PATH
 }
 if ($Toolchain) { $cargoArgs += ('+' + $Toolchain) }
-foreach ($script in @('app.js','space.js','face-worker.js','icons.js','map-layout.js','maintenance.js','wizard.js','cleanup-plan.js','performance.js')) {
+foreach ($script in @('app.js','space.js','face-worker.js','icons.js','map-layout.js','maintenance.js','wizard.js','cleanup-plan.js','performance.js','cleanup-ui.js','disk-tree.js','optimizer-ui.js')) {
     & node --check (Join-Path 'cleaner_ultra/web' $script)
     if ($LASTEXITCODE -ne 0) { throw "Frontend validation failed: $script" }
 }
-& node --test tests/map-layout.cjs tests/cleanup-plan.cjs tests/wizard.cjs
+& node --test tests/map-layout.cjs tests/cleanup-plan.cjs tests/wizard.cjs tests/disk-tree.cjs tests/optimizer-ui.cjs
 if ($LASTEXITCODE -ne 0) { throw 'Disk map layout tests failed' }
 & .\packaging\prepare-runtime.ps1
 & .\packaging\fetch-ffmpeg.ps1
