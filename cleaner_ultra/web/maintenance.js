@@ -3,7 +3,7 @@
   const model={registry:[],startup:[],selections:{startup:new Set(),registry:new Set()},offsets:{startup:0,registry:0},apps:[],appOffset:0,history:[],loadedApps:false,loadedRegistry:false,backupOffset:0,optimizerTimer:null};
   const button=(text,fn,cls="button secondary")=>{const b=node("button",cls,text);b.type="button";b.onclick=()=>action(fn);return b;};
   const labels={missing:"EXE не найден",present:"EXE существует",review:"Ручная проверка"};
-  const kinds={"/api/startup/apply":"Автозагрузка","/api/registry/apply":"Исправление реестра","/api/power/apply":"Смена схемы питания","/api/optimizer/completed":"Встроенная оптимизация","/api/space/trash":"Файлы в корзину","/api/space/restore":"Восстановление файлов","/api/maintenance/apply":"Изменение реестра","/api/maintenance/restore":"Восстановление реестра","/api/apps/uninstall":"Запуск удаления программы","/api/cache":"Обслуживание кеша"};
+  const kinds={"/api/cleanup/apply":"Очистка кешей и TEMP","/api/cleanup/restore":"Восстановление кешей / TEMP","/api/startup/apply":"Автозагрузка","/api/registry/apply":"Исправление реестра","/api/power/apply":"Смена схемы питания","/api/optimizer/completed":"Встроенная оптимизация","/api/space/trash":"Файлы в корзину","/api/space/restore":"Восстановление файлов","/api/maintenance/apply":"Изменение реестра","/api/maintenance/restore":"Восстановление реестра","/api/apps/uninstall":"Запуск удаления программы","/api/cache":"Обслуживание кеша"};
   function metrics(r){
     const parts=[];
     if(r.checked!==undefined)parts.push(`Проверено файлов: ${num(r.checked)}`,`Дефрагментировано: ${num(r.moved)}`,`Проверено SHA-256: ${bytes(r.verified_bytes)}`,`Состояние: ${r.state}`);
@@ -131,7 +131,7 @@
   $("#history-refresh").onclick=()=>action(history);$("#optimizer-stop").onclick=()=>action(async()=>{await api("/api/optimizer/stop",{});toast("Остановка после текущего системного вызова");});
   $("#report-export").onclick=()=>action(async()=>{
     await history();const info=await api("/api/space/status");const job=await api("/api/optimizer/status");
-    const report={application:"Cleaner Ultra",version:state.version||"0.8.0",created_at:new Date().toISOString(),disk_snapshot:info,operations:model.history,optimizer:job};
+    const report={application:"Cleaner Ultra",version:state.version||"0.9.0",created_at:new Date().toISOString(),disk_snapshot:info,operations:model.history,optimizer:job};
     const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:"application/json"}));const a=node("a");a.href=url;a.download=`CleanerUltra-report-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast("Локальный отчёт подготовлен. Он содержит пути файлов из вашего анализа.");
   });
   window.CleanerUltraMaintenance={result,confirm,optimizer,open:async(page)=>{if(page==="registry"||page==="startup")await backups();if(page==="apps"&&!model.loadedApps)await loadApps();if(page==="history")await history();if(page==="optimize")await optimizer();}};

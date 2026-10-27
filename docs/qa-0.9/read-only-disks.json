@@ -1,0 +1,22 @@
+{
+  "read_only": true,
+  "drives": [
+    {
+      "drive": "C:",
+      "files": 633304,
+      "errors": 635,
+      "bytes": 742929063959,
+      "seconds": 174,
+      "state": "complete"
+    },
+    {
+      "drive": "M:",
+      "files": 151288,
+      "errors": 2,
+      "bytes": 704779517886,
+      "seconds": 33,
+      "state": "complete"
+    }
+  ],
+  "user_files_deleted": 0
+}

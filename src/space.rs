@@ -49,6 +49,7 @@ pub struct Space {
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     data: PathBuf,
     protected_roots: Vec<String>,
+    cleanup_root: Option<PathBuf>,
 }
 
 fn normal(path: &Path) -> PathBuf {
@@ -170,6 +171,16 @@ const COLS: &str = "id,path,size,modified,category,temporary,protected,stamp";
 
 impl Space {
     pub fn open(data: &Path) -> Result<Arc<Self>> {
+        Self::open_mode(data, None)
+    }
+    pub(crate) fn open_cleanup(data: &Path, root: &Path) -> Result<Arc<Self>> {
+        let approved = canonical(root)?;
+        if approved != normal(root) || root.is_symlink() {
+            bail!("Корень очистки содержит ссылку");
+        }
+        Self::open_mode(data, Some(approved))
+    }
+    fn open_mode(data: &Path, cleanup_root: Option<PathBuf>) -> Result<Arc<Self>> {
         fs::create_dir_all(data)?;
         let data = canonical(data)?;
         let db = Connection::open(data.join("space.sqlite3"))?;
@@ -257,6 +268,7 @@ impl Space {
             worker: Mutex::new(None),
             data,
             protected_roots,
+            cleanup_root,
         });
         space.recover()?;
         Ok(space)
@@ -303,6 +315,9 @@ impl Space {
             || filename.starts_with("usrclass.dat")
         {
             return true;
+        }
+        if let Some(root) = &self.cleanup_root {
+            return !path.starts_with(root);
         }
         let p = path.to_string_lossy().to_lowercase();
         self.protected_roots.iter().any(|root| {
@@ -426,9 +441,11 @@ impl Space {
             .and_then(|p| canonical(&p).ok());
         let cutoff = now().saturating_sub(7 * 86400);
         let mut batch = Vec::new();
+        let mut directories = Vec::new();
         let mut files = 0u64;
         let mut bytes = 0u64;
         let mut errors = 0u64;
+        let mut heartbeat = std::time::Instant::now();
         let walker = walkdir::WalkDir::new(root)
             .follow_links(false)
             .same_file_system(true)
@@ -436,6 +453,17 @@ impl Space {
             .filter_entry(|entry| {
                 if entry.depth() == 0 {
                     return true;
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if entry
+                        .path()
+                        .symlink_metadata()
+                        .is_ok_and(|m| m.file_attributes() & 0x400 != 0)
+                    {
+                        return false;
+                    }
                 }
                 let name = entry.file_name().to_string_lossy().to_lowercase();
                 !matches!(
@@ -461,7 +489,22 @@ impl Space {
                     continue;
                 }
             };
+            if heartbeat.elapsed().as_millis() >= 250 {
+                let mut p = self.progress.lock();
+                p.current = entry.path().to_string_lossy().into();
+                p.files = files;
+                p.bytes = bytes;
+                p.errors = errors;
+                heartbeat = std::time::Instant::now();
+            }
             if !entry.file_type().is_file() {
+                if entry.file_type().is_dir() {
+                    directories.push(entry.path().to_path_buf());
+                    if directories.len() >= 512 {
+                        self.write_directories(id, &directories)?;
+                        directories.clear();
+                    }
+                }
                 continue;
             }
             let meta = match entry.metadata() {
@@ -492,6 +535,7 @@ impl Space {
                 self.checkpoint(id, files, bytes, errors, entry.path())?;
             }
         }
+        self.write_directories(id, &directories)?;
         self.write_batch(id, root, &batch)?;
         self.checkpoint(id, files, bytes, errors, root)?;
         let state = if self.cancel.load(Ordering::Relaxed) {
@@ -508,6 +552,29 @@ impl Space {
         let tx = db.transaction()?;
         tx.execute("DELETE FROM files WHERE scan<>?", [id])?;
         tx.execute("DELETE FROM folders WHERE scan<>?", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+    fn write_directories(&self, id: i64, directories: &[PathBuf]) -> Result<()> {
+        if directories.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db.lock();
+        let tx = db.transaction()?;
+        {
+            let mut q = tx.prepare_cached(
+                "INSERT OR IGNORE INTO folders(scan,path,parent,bytes,files)VALUES(?,?,?,0,0)",
+            )?;
+            for path in directories {
+                q.execute(params![
+                    id,
+                    path.to_string_lossy(),
+                    path.parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ])?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -622,14 +689,14 @@ impl Space {
         }
         children.truncate(100);
         Ok(
-            json!({"path":folder,"root":root,"parent":if folder==root{None}else{folder.parent()},"folders":children,"total":total,"offset":offset.max(0)}),
+            json!({"scan":p.id,"path":folder,"root":root,"parent":if folder==root{None}else{folder.parent()},"folders":children,"total":total,"offset":offset.max(0)}),
         )
     }
     pub fn map(&self, path: &str, offset: i64) -> Result<Value> {
         let p = self.progress.lock().clone();
         if p.id == 0 {
             return Ok(
-                json!({"path":"","root":"","parent":null,"crumbs":[],"entries":[],"tiles":[],"total":0,"bytes":0,"files":0,"offset":0,"remainder":{"bytes":0,"count":0}}),
+                json!({"scan":0,"path":"","root":"","parent":null,"crumbs":[],"entries":[],"tiles":[],"total":0,"bytes":0,"files":0,"offset":0,"remainder":{"bytes":0,"count":0}}),
             );
         }
         let root = PathBuf::from(&p.root);
@@ -673,7 +740,7 @@ impl Space {
             .collect();
         crumbs.reverse();
         Ok(
-            json!({"path":folder,"root":root,"parent":if folder==root{None}else{folder.parent()},"crumbs":crumbs,"entries":query(60,offset)?,"tiles":tiles,"total":total,"bytes":bytes,"files":files,"offset":offset,"remainder":{"bytes":bytes.saturating_sub(shown),"count":total.saturating_sub(120)}}),
+            json!({"scan":p.id,"path":folder,"root":root,"parent":if folder==root{None}else{folder.parent()},"crumbs":crumbs,"entries":query(60,offset)?,"tiles":tiles,"total":total,"bytes":bytes,"files":files,"offset":offset,"remainder":{"bytes":bytes.saturating_sub(shown),"count":total.saturating_sub(120)}}),
         )
     }
     fn file(&self, id: i64) -> Result<SpaceFile> {
@@ -970,32 +1037,40 @@ impl Space {
         Ok(json!({"done":done,"errors":errors}))
     }
     pub fn optimization_paths(&self, drive: &str) -> Result<Vec<String>> {
-        if drive.len() != 2
-            || !drive.as_bytes()[0].is_ascii_alphabetic()
-            || drive.as_bytes()[1] != b':'
-        {
-            bail!("Выберите локальный диск");
-        }
+        self.optimization_stream(drive)?.collect()
+    }
+    pub fn optimization_stream(&self, drive: &str) -> Result<OptimizationPaths> {
+        let drive = crate::trim::validate_drive(drive)?;
         let p = self.progress.lock().clone();
         if p.state != "complete" {
-            bail!("Сначала завершите анализ диска или папки");
+            bail!(
+                "Анализ пространства ещё не завершён. Дождитесь завершения или остановите его и запустите новый"
+            );
         }
         if Self::exclusions_pending(&self.db.lock())? {
             bail!("Исключения изменились. Повторите анализ");
         }
-        let prefix = format!("{}\\", drive.to_ascii_uppercase());
-        let db = self.db.lock();
-        let mut q =
-            db.prepare("SELECT path FROM files WHERE scan=? AND protected=0 ORDER BY size DESC")?;
-        let paths = q
-            .query_map([p.id], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(paths
-            .into_iter()
-            .filter(|path| {
-                path.to_ascii_uppercase().starts_with(&prefix) && !self.protected(Path::new(path))
-            })
-            .collect())
+        let db = Connection::open_with_flags(
+            self.data.join("space.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(std::time::Duration::from_secs(30))?;
+        db.execute_batch("BEGIN DEFERRED")?;
+        let prefix = format!("{drive}\\");
+        let total = db.query_row(
+            "SELECT COUNT(*) FROM files WHERE scan=? AND protected=0 AND UPPER(SUBSTR(path,1,3))=?",
+            params![p.id, prefix],
+            |r| r.get::<_, u64>(0),
+        )?;
+        Ok(OptimizationPaths {
+            db,
+            scan: p.id,
+            prefix,
+            last: 0,
+            total,
+            batch: std::collections::VecDeque::new(),
+            ended: false,
+        })
     }
     pub fn reveal(&self, id: i64) -> Result<Value> {
         let file = self.file(id)?;
@@ -1176,5 +1251,84 @@ fn reveal_file(path: &Path) -> Result<()> {
     {
         let _ = path;
         bail!("Проводник доступен на Windows")
+    }
+}
+
+/// A stable WAL snapshot, paged by primary key, not a 50 000-item allocation.
+pub struct OptimizationPaths {
+    db: Connection,
+    scan: i64,
+    prefix: String,
+    last: i64,
+    pub total: u64,
+    batch: std::collections::VecDeque<(i64, String)>,
+    ended: bool,
+}
+impl Iterator for OptimizationPaths {
+    type Item = Result<String>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.batch.is_empty() && !self.ended {
+            let result = (|| -> Result<Vec<(i64, String)>> {
+                Ok(self.db.prepare("SELECT id,path FROM files WHERE scan=? AND protected=0 AND id>? AND UPPER(SUBSTR(path,1,3))=? ORDER BY id LIMIT 512")?
+                .query_map(params![self.scan,self.last,self.prefix],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+            })();
+            match result {
+                Ok(rows) => {
+                    self.ended = rows.len() < 512;
+                    self.batch.extend(rows);
+                }
+                Err(e) => {
+                    self.ended = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+        self.batch.pop_front().map(|(id, path)| {
+            self.last = id;
+            Ok(path)
+        })
+    }
+}
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[test]
+    fn optimization_stream_pages_beyond_fifty_thousand_and_keeps_wal_snapshot() {
+        let t = tempfile::tempdir().unwrap();
+        let s = Space::open(t.path()).unwrap();
+        {
+            let mut db = s.db.lock();
+            let tx = db.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO scans(id,root,state,started)VALUES(1,'C:\\','complete',0)",
+                [],
+            )
+            .unwrap();
+            {
+                let mut q=tx.prepare("INSERT INTO files(scan,path,name,size,modified,category,temporary,protected,stamp,parent)VALUES(1,?,'own',1,1,'other',0,0,1,'C:\\')").unwrap();
+                for i in 0..50175 {
+                    q.execute([format!("C:\\own-fixtures\\{i}.bin")]).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        *s.progress.lock() = ScanProgress {
+            id: 1,
+            root: r"C:\".into(),
+            state: "complete".into(),
+            ..Default::default()
+        };
+        let mut stream = s.optimization_stream("C:").unwrap();
+        assert_eq!(stream.total, 50175);
+        s.db.lock()
+            .execute("DELETE FROM files WHERE scan=1", [])
+            .unwrap();
+        let mut count = 0;
+        while let Some(path) = stream.next() {
+            assert!(path.unwrap().starts_with(r"C:\own-fixtures\"));
+            assert!(stream.batch.len() < 512);
+            count += 1;
+        }
+        assert_eq!(count, 50175);
     }
 }

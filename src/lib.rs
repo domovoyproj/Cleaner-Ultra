@@ -9,3 +9,5 @@ pub mod server;
 pub mod space;
 pub mod trim;
 pub mod video;
+
+pub mod cleaner;
