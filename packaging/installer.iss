@@ -1,8 +1,11 @@
 #ifndef AppVersion
   #define AppVersion "0.7.0"
 #endif
+#ifndef AppId
+  #define AppId "{{49DBF80E-5227-44E8-B78F-206A578F593B}"
+#endif
 [Setup]
-AppId={{49DBF80E-5227-44E8-B78F-206A578F593B}
+AppId={#AppId}
 AppName=Cleaner Ultra
 AppVersion={#AppVersion}
 AppPublisher=domovoyproj
@@ -24,15 +27,15 @@ CloseApplications=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Files]
-Source: "..\dist\CleanerUltra-{#AppVersion}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\CleanerUltra-{#AppVersion}\*"; DestDir: "{app}"; Excludes: "*.WebView2\*,webview\*,*.sqlite3,*.sqlite3-wal,*.sqlite3-shm"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Icons]
-Name: "{group}\CleanerUltra"; Filename: "{app}\CleanerUltra.exe"
-Name: "{autodesktop}\CleanerUltra"; Filename: "{app}\CleanerUltra.exe"; Tasks: desktopicon
+Name: "{group}\Cleaner Ultra"; Filename: "{app}\CleanerUltra.exe"
+Name: "{autodesktop}\Cleaner Ultra"; Filename: "{app}\CleanerUltra.exe"; Tasks: desktopicon
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; Flags: unchecked
 [Run]
 Filename: "{app}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Установка Microsoft WebView2…"; Flags: waituntilterminated; Check: NeedsWebView2
-Filename: "{app}\CleanerUltra.exe"; Description: "Запустить CleanerUltra"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\CleanerUltra.exe"; Description: "Запустить Cleaner Ultra"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function NeedsWebView2: Boolean;

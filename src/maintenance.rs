@@ -661,3 +661,71 @@ mod history_tests {
         assert_eq!(history["items"][0]["kind"], "/api/space/trash");
     }
 }
+#[cfg(all(test, windows))]
+mod native_qa {
+    use super::*;
+    #[test]
+    #[ignore = "Explicit native QA: creates and removes only its own UUID-named startup value"]
+    fn native_registry_clean_restore_own_value() {
+        let base =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cleaner_ultra/native-qa");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("registry-")
+            .tempdir_in(&base)
+            .unwrap();
+        let name = format!("CleanerUltra.QA.{}", uuid::Uuid::new_v4());
+        let command = format!(
+            "\"{}\" --qa",
+            dir.path()
+                .join("intentionally-absent.exe")
+                .to_string_lossy()
+                .replace('/', "\\")
+        );
+        let value = RegistryValue {
+            key: RUN.into(),
+            name: name.clone(),
+            kind: 1,
+            data: command
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        };
+        let mut registry = NativeRegistry;
+        assert!(registry.read(RUN, &name).unwrap().is_none());
+        registry.restore(&value).unwrap();
+        struct Cleanup(RegistryValue);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let mut r = NativeRegistry;
+                if r.read(&self.0.key, &self.0.name).ok().flatten().as_ref() == Some(&self.0) {
+                    let _ = r.remove(&self.0);
+                }
+            }
+        }
+        let _cleanup = Cleanup(value.clone());
+        let service = Maintenance::open(dir.path()).unwrap();
+        let scan = service.scan().unwrap();
+        let id = scan["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(service.apply(&[id], "clean").unwrap()["done"], 1);
+        assert!(registry.read(RUN, &name).unwrap().is_none());
+        let b = service.backups().unwrap()["items"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        service.restore(&b).unwrap();
+        assert_eq!(registry.read(RUN, &name).unwrap(), Some(value));
+        println!(
+            "native registry cleanup + exact restore verified; own UUID value removed by guard"
+        );
+    }
+}

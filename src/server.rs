@@ -526,11 +526,15 @@ fn route(
                     bail!("Подтвердите операцию");
                 }
                 let drive = body["drive"].as_str().unwrap_or("");
-                optimizer.start(
-                    drive,
-                    body["analyze"].as_bool().unwrap_or(true),
-                    space.optimization_paths(drive)?,
-                )?
+                if body["mode"].as_str() == Some("trim") {
+                    optimizer.start_trim(drive)?
+                } else {
+                    optimizer.start(
+                        drive,
+                        body["analyze"].as_bool().unwrap_or(true),
+                        space.optimization_paths(drive)?,
+                    )?
+                }
             }
             "/api/optimizer/stop" => optimizer.stop(),
             "/api/apps/uninstall" => {

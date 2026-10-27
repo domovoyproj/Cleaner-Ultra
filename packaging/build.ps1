@@ -81,5 +81,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
 $installer = Join-Path $distRoot "CleanerUltra-Setup-$releaseVersion-windows-x64.exe"
 if (-not (Test-Path -LiteralPath $installer)) { throw 'Installer was not produced' }
 $archive = Join-Path $distRoot "CleanerUltra-$releaseVersion-windows-x64.zip"
+$runtimeData = @(Get-ChildItem -LiteralPath $distribution -Recurse -Force | Where-Object { $_.Name -like '*.sqlite3*' -or $_.Name -like '*.WebView2' -or $_.Name -eq 'webview' })
+if ($runtimeData.Count) { throw 'Runtime browser profiles or databases must never be distributed' }
 Compress-Archive -Path (Join-Path $distribution '*') -DestinationPath $archive -Force
 Get-FileHash -Algorithm SHA256 -LiteralPath $installer,$archive | ForEach-Object { $_.Hash.ToLower() + '  ' + (Split-Path $_.Path -Leaf) } | Set-Content -Encoding ascii (Join-Path $distRoot "SHA256SUMS-$releaseVersion.txt")

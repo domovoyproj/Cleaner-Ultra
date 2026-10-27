@@ -45,10 +45,51 @@ impl Optimizer {
         }
     }
 
+    pub fn start_trim(self: &Arc<Self>, drive: &str) -> Result<Value> {
+        let drive = crate::trim::validate_drive(drive)?;
+        if !crate::space::is_administrator() {
+            bail!("Перезапустите Cleaner Ultra с правами администратора");
+        }
+        let mut progress = self.progress.lock();
+        if progress.state == "running" {
+            bail!("Операция уже выполняется");
+        }
+        *progress = Progress {
+            state: "running".into(),
+            mode: "trim".into(),
+            drive: drive.clone(),
+            current: "Windows Storage API: ReTrim свободных блоков".into(),
+            ..Default::default()
+        };
+        drop(progress);
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::trim::retrim(&drive);
+            let mut p = this.progress.lock();
+            p.state = if result.is_ok() { "complete" } else { "error" }.into();
+            if let Err(e) = result {
+                p.errors.push(e.to_string());
+            }
+            p.current.clear();
+            p.elapsed_ms = started.elapsed().as_millis() as u64;
+            if let Some(history) = &this.history {
+                if let Err(e) = history.record("/api/optimizer/completed", &json!(*p)) {
+                    p.errors.push(format!("История: {e}"));
+                }
+            }
+        });
+        Ok(json!({"started":true,"mode":"trim"}))
+    }
     pub fn status(&self) -> Value {
         json!(*self.progress.lock())
     }
     pub fn stop(&self) -> Value {
+        let p = self.progress.lock();
+        if p.state == "running" && p.mode == "trim" {
+            return json!({"stopping":false,"message":"Windows ReTrim не поддерживает отмену после запуска. Ожидайте результата."});
+        }
+        drop(p);
         self.cancel.store(true, Ordering::Release);
         json!({"stopping":true})
     }
@@ -291,9 +332,7 @@ mod native {
                 bail!("Тип носителя не определён");
             }
             if moving && response[8] == 0 {
-                bail!(
-                    "SSD или носитель без задержки поиска: дефрагментация отключена. TRIM в этой версии не реализован"
-                );
+                bail!("SSD или носитель без задержки поиска: выберите TRIM вместо дефрагментации");
             }
             Ok(Self {
                 volume,
@@ -344,7 +383,14 @@ mod native {
             Ok(Some((fragments, previous as u64)))
         }
         fn destination(&self, clusters: u64, cancel: &AtomicBool) -> Result<Option<u64>> {
-            let mut start = 0i64;
+            self.destination_after(clusters, cancel, 0)
+        }
+        fn destination_after(
+            &self,
+            clusters: u64,
+            cancel: &AtomicBool,
+            mut start: i64,
+        ) -> Result<Option<u64>> {
             loop {
                 if cancel.load(Ordering::Acquire) {
                     return Ok(None);
@@ -461,6 +507,81 @@ mod native {
             }
             Ok(Some((true, true, meta.len())))
         }
+    }
+    #[test]
+    #[ignore = "Requires explicit admin execution; operates only on its own uniquely named fixture"]
+    fn native_cluster_relocation_own_fixture() {
+        assert!(crate::space::is_administrator(), "Administrator required");
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join(".cleaner_ultra/native-qa");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("clusters-")
+            .tempdir_in(&base)
+            .unwrap();
+        let path = dir.path().join("own-fixture.bin");
+        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(31).wrapping_add(i / 4096) % 251) as u8;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let path = std::fs::canonicalize(&path)
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string();
+        let drive = path[..2].to_ascii_uppercase();
+        let volume = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(format!(r"\\.\{drive}"))
+            .unwrap();
+        let device = Device { volume, drive };
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let (_, clusters) = device.extents(&file).unwrap().unwrap();
+        assert!(clusters > 2);
+        let half = clusters / 2;
+        let cancel = AtomicBool::new(false);
+        let first = device
+            .destination(clusters, &cancel)
+            .unwrap()
+            .expect("Free space required");
+        let second = device
+            .destination_after(clusters, &cancel, (first + clusters + 4096) as i64)
+            .unwrap()
+            .expect("Second free range required");
+        for (vcn, lcn, count) in [(0, first, half), (half, second, clusters - half)] {
+            let request = MOVE_FILE_DATA {
+                FileHandle: file.as_raw_handle(),
+                StartingVcn: vcn as i64,
+                StartingLcn: lcn as i64,
+                ClusterCount: count as u32,
+            };
+            ioctl(
+                &device.volume,
+                FSCTL_MOVE_FILE,
+                (&request as *const MOVE_FILE_DATA).cast(),
+                std::mem::size_of_val(&request) as u32,
+                &mut [],
+            )
+            .unwrap();
+        }
+        assert!(device.extents(&file).unwrap().unwrap().0 >= 2);
+        drop(file);
+        let before = crate::analysis::fingerprint(Path::new(&path)).unwrap();
+        let result = device.process(&path, true, &cancel).unwrap().unwrap();
+        assert!(result.0 && result.1);
+        assert_eq!(result.2, bytes.len() as u64);
+        assert_eq!(
+            crate::analysis::fingerprint(Path::new(&path)).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        println!("native relocation verified: own 16 MiB fixture, SHA-256 preserved");
     }
 }
 #[cfg(test)]

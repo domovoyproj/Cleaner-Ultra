@@ -52,4 +52,8 @@ jobs:
         run: |
           RELEASE_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
           RELEASE_TAG="v${RELEASE_VERSION}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists; preserving its validated assets."
+            exit 0
+          fi
           gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "CleanerUltra $RELEASE_TAG" --notes-file "docs/RELEASE-${RELEASE_VERSION%.*}.md"

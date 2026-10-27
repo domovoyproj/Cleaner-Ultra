@@ -77,7 +77,7 @@ fn run() -> Result<()> {
     #[cfg(all(windows, feature = "desktop"))]
     {
         use tao::{
-            dpi::LogicalSize,
+            dpi::{LogicalSize, PhysicalPosition},
             event::{Event, WindowEvent},
             event_loop::{ControlFlow, EventLoopBuilder},
             window::{Icon, ResizeDirection, WindowBuilder},
@@ -103,9 +103,31 @@ fn run() -> Result<()> {
                 (size.width as f64 / scale, size.height as f64 / scale)
             })
             .unwrap_or((1600.0, 1040.0));
-        let initial_width = 1440.0_f64.min((screen_width - 64.0).max(320.0));
-        let initial_height = 940.0_f64.min((screen_height - 96.0).max(320.0));
+        let initial_width = value("--width")
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(f64::from)
+            .unwrap_or(1440.0)
+            .clamp(320.0, (screen_width - 64.0).max(320.0));
+        let initial_height = value("--height")
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(f64::from)
+            .unwrap_or(940.0)
+            .clamp(320.0, (screen_height - 96.0).max(320.0));
+        let initial_position = event_loop
+            .primary_monitor()
+            .map(|monitor| {
+                let origin = monitor.position();
+                let size = monitor.size();
+                let scale = monitor.scale_factor();
+                PhysicalPosition::new(
+                    origin.x + ((size.width as f64 - initial_width * scale) / 2.0).max(0.0) as i32,
+                    origin.y
+                        + ((size.height as f64 - initial_height * scale) / 2.0).max(0.0) as i32,
+                )
+            })
+            .unwrap_or(PhysicalPosition::new(32, 32));
         let window = WindowBuilder::new()
+            .with_position(initial_position)
             .with_title("Cleaner Ultra")
             .with_decorations(false)
             .with_window_icon(Some(Icon::from_rgba(icon.into_raw(), width, height)?))
@@ -118,7 +140,10 @@ fn run() -> Result<()> {
         let origin = url.clone();
         let ipc_origin = url.clone();
         let proxy = event_loop.create_proxy();
-        let _webview = wry::WebViewBuilder::new()
+        // Keep the embedded browser cache beside the selected application data,
+        // never beside the installed EXE or inside a portable/release bundle.
+        let mut web_context = wry::WebContext::new(Some(library.data.join("webview")));
+        let _webview = wry::WebViewBuilder::new_with_web_context(&mut web_context)
             .with_url(&url)
             .with_initialization_script(
                 "Object.defineProperty(window, '__CLEANER_ULTRA_DESKTOP__', {value: true});",

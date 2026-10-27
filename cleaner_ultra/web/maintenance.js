@@ -98,8 +98,8 @@
   async function optimizer(){
     const d=await api("/api/optimizer/status");
     const labels={running:"Операция выполняется",complete:"Операция завершена",cancelled:"Операция остановлена",error:"Операция прервана"};
-    $("#optimizer-state").textContent=labels[d.state]||"Готов к работе";$("#optimizer-stop").disabled=d.state!=="running";
-    $("#optimizer-progress").max=d.total||1;$("#optimizer-progress").value=d.checked||0;$("#optimizer-current").textContent=d.current||"";
+    $("#optimizer-state").textContent=labels[d.state]||"Готов к работе";$("#optimizer-stop").disabled=d.state!=="running"||d.mode==="trim";
+    $("#optimizer-progress").max=d.total||1;if(d.mode==="trim"&&d.state==="running")$("#optimizer-progress").removeAttribute("value");else $("#optimizer-progress").value=d.checked||0;$("#optimizer-current").textContent=(d.mode==="trim"&&d.state==="running")?"Windows ReTrim выполняется. Точный процент недоступен; дождитесь результата.":d.current||"";
     $("#optimizer-summary").replaceChildren(...[`Проверено: ${num(d.checked)} / ${num(d.total)}`,`Фрагментированных: ${num(d.fragmented)}`,`Дефрагментировано: ${num(d.moved)}`,`Проверено SHA-256: ${bytes(d.verified_bytes)}`,`Пропущено: ${num(d.skipped)}`,`Время: ${Math.round(d.elapsed_ms/1000)} с`].map(t=>node("span","ultra-metric",t)));
     $("#optimizer-errors").replaceChildren(...(d.errors||[]).map(t=>node("p","",t)));
     clearTimeout(model.optimizerTimer);if(d.state==="running")model.optimizerTimer=setTimeout(()=>optimizer().catch(e=>toast(e.message)),1000);

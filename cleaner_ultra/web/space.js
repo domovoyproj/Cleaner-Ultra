@@ -10,7 +10,7 @@ const headings = {
   map:["УВИДЕТЬ БОЛЬШЕ","Карта пространства<span>.</span>","Увидеть объём. Найти лишнее. Сохранить важное."],
   large:["ВЕСОМЫЕ ПРИЧИНЫ ДЛЯ ПОРЯДКА","Большие файлы.<br>Большие возможности<span>.</span>","Самое объёмное — в начале списка. Каждый файл под вашим контролем."],
   cleanup:["ОСТАВИТЬ НУЖНОЕ","Свободнее диск.<br>Легче работать<span>.</span>","Проверьте кандидатов и выберите подходящий способ очистки."],
-  optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Собственный движок анализа и дефрагментации HDD."],
+  optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Дефрагментация HDD и TRIM свободных блоков SSD внутри приложения."],
   trash:["ПРАВО ПЕРЕДУМАТЬ","Ничего важного<br>не потеряно<span>.</span>","Проверьте сохранённые файлы и восстановите нужные."],
 };
 const state = {token:"",page:"overview",info:null,drive:null,mode:"large",offset:0,search:"",category:"",folder:"",mapPath:"",mapOffset:0,selected:new Map(),files:[],scan:0,total:0,busy:false,running:false,fileRequest:0,mapRequest:0,trashOffset:0};
@@ -264,12 +264,19 @@ async function loadTrash() {
 $("#trash-previous").onclick=()=>action(async()=>{state.trashOffset=Math.max(0,state.trashOffset-60);await loadTrash();});
 $("#trash-next").onclick=()=>action(async()=>{state.trashOffset+=60;await loadTrash();});
 function renderOptimizer(drives) {
-  $("#optimizer-drives").replaceChildren(...drives.filter(d=>d.optimizable).map(d=>{const r=node("div","optimizer-row");const copy=node("div","drive-name");copy.append(node("strong","",`Локальный диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно из ${bytes(d.total)} · тип носителя определит Windows`));const a=node("button","button secondary","Анализировать");a.onclick=()=>openOptimize(d,true);const b=node("button","button primary","Оптимизировать ↗");b.onclick=()=>openOptimize(d,false);r.append(node("span","","▱"),copy,a,b);return r;}));if(!drives.some(d=>d.optimizable))$("#optimizer-drives").append(empty("Нет доступных локальных дисков для оптимизации."));
+  $("#optimizer-drives").replaceChildren(...drives.filter(d=>d.optimizable).map(d=>{const r=node("div","optimizer-row");const copy=node("div","drive-name");copy.append(node("strong","",`Локальный диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно из ${bytes(d.total)} · тип носителя определит Windows`));const a=node("button","button secondary","Анализировать");a.onclick=()=>openOptimize(d,true);const b=node("button","button primary","Оптимизировать ↗");b.onclick=()=>openOptimize(d,false);const trim=node("button","button secondary","TRIM SSD");trim.onclick=()=>openTrim(d);r.append(node("span","","▱"),copy,a,b,trim);return r;}));if(!drives.some(d=>d.optimizable))$("#optimizer-drives").append(empty("Нет доступных локальных дисков для оптимизации."));
 }
 function openOptimize(drive,analyze){
+  $("#optimize-note").textContent="Для доступа к тому нужны права администратора. Остановка завершает обработку после текущего системного вызова.";
   $("#optimize-title").textContent=`${analyze?"Проверить фрагментацию":"Дефрагментировать"} ${drive.path.slice(0,2)}?`;
   $("#optimize-description").textContent=analyze?"Cleaner Ultra прочитает карту экстентов файлов из завершённого снимка анализа выбранного диска. Содержимое файлов не изменяется.":"Встроенный движок переместит кластеры доступных файлов HDD средствами ядра Windows и сверит SHA-256. SSD, системные, занятые и неподдерживаемые файлы пропускаются.";
   $("#confirm-optimize").onclick=()=>action(async()=>{await api("/api/space/optimize",{drive:drive.path.slice(0,2),analyze,confirmed:true});$("#optimize-dialog").close();await window.CleanerUltraMaintenance?.optimizer();toast("Операция запущена внутри Cleaner Ultra");});$("#optimize-dialog").showModal();
+}
+function openTrim(drive){
+  $("#optimize-note").textContent="Нужны права администратора. После запуска ReTrim отмена недоступна. Закрытие этого диалога до запуска ничего не изменяет.";
+  $("#optimize-title").textContent=`Выполнить TRIM ${drive.path.slice(0,2)}?`;
+  $("#optimize-description").textContent="Cleaner Ultra обратится напрямую к Windows Storage API. Windows обработает свободные блоки тома; содержимое существующих файлов не удаляется. После запуска ReTrim нельзя прервать. Дождитесь итогового результата в приложении.";
+  $("#confirm-optimize").onclick=()=>action(async()=>{await api("/api/space/optimize",{drive:drive.path.slice(0,2),mode:"trim",confirmed:true});$("#optimize-dialog").close();await window.CleanerUltraMaintenance?.optimizer();toast("Windows выполняет ReTrim. Ожидайте завершения.");});$("#optimize-dialog").showModal();
 }
 $$("[data-system]").forEach(b=>b.onclick=()=>action(async()=>{await api("/api/space/system",{page:b.dataset.system});toast("Открыт системный инструмент Windows");}));
 const desktop=Boolean(window.__CLEANER_ULTRA_DESKTOP__&&window.ipc?.postMessage);

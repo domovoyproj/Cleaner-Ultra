@@ -6,4 +6,5 @@ pub mod maintenance;
 pub mod optimizer;
 pub mod server;
 pub mod space;
+pub mod trim;
 pub mod video;

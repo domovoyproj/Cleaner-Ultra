@@ -1,6 +1,7 @@
 {
-  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-08-13-05/ffmpeg-n8.1.3-14-g330caae0c1-win64-lgpl-shared-8.1.zip",
-  "sha256": "1af9562d002b8e2ab66817616e8a9211e77ab4b0fef58c5c345f467dc0213729",
-  "source": "https://github.com/FFmpeg/FFmpeg/archive/330caae0c1.tar.gz",
-  "build": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-10-08-13-05"
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-26-14-25/ffmpeg-n8.1.3-24-g92611900bb-win64-lgpl-shared-8.1.zip",
+  "sha256": "96afe9bee66012f4cbc336a473f0b595060d73bdc5efe4331d55101500d0a93e",
+  "source": "https://github.com/FFmpeg/FFmpeg/archive/92611900bb.tar.gz",
+  "build": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-10-26-14-25",
+  "mirror": "https://github.com/domovoyproj/Cleaner-Ultra/releases/download/v0.7.0/ffmpeg-8.1-lgpl-runtime.zip"
 }
