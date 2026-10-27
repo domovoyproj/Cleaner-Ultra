@@ -680,7 +680,8 @@ mod tests {
     }
     fn setup(age: u64) -> (tempfile::TempDir, Arc<Cleaner>, Rule, PathBuf, PathBuf) {
         let t = tempfile::tempdir().unwrap();
-        let profile = t.path().join("profile");
+        // Fixtures compare against scan output, which uses canonical long paths.
+        let profile = normal(&std::fs::canonicalize(t.path()).unwrap()).join("profile");
         let cache = profile.join("Cache");
         std::fs::create_dir_all(&cache).unwrap();
         let a = cache.join("one.bin");
