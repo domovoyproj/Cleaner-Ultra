@@ -78,7 +78,7 @@ def make_server(library, port=8765, folder_picker=None):
                 self.send({'error': str(error)}, status=400)
 
         def do_POST(self):
-            if not self.allowed() or self.headers.get('X-PhotoSort-Token') != token:
+            if not self.allowed() or self.headers.get('X-CleanerUltra-Token') != token:
                 self.send({'error': 'Доступ запрещён'}, status=403)
                 return
             try:
@@ -124,15 +124,15 @@ def make_server(library, port=8765, folder_picker=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='PhotoSort — локальная фотобиблиотека')
+    parser = argparse.ArgumentParser(description='CleanerUltra — локальная фотобиблиотека')
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--data', default=str(Path(__file__).resolve().parent.parent / '.photosort'))
+    parser.add_argument('--data', default=str(Path(__file__).resolve().parent.parent / '.cleaner_ultra'))
     parser.add_argument('--no-browser', action='store_true')
     args = parser.parse_args()
     library = Library(args.data)
     server = make_server(library, args.port)
     url = f'http://127.0.0.1:{server.server_port}'
-    print(f'PhotoSort: {url}', flush=True)
+    print(f'CleanerUltra: {url}', flush=True)
     if not args.no_browser:
         threading.Timer(0.6, webbrowser.open, args=(url,)).start()
     try:

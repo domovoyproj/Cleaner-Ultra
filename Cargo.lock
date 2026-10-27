@@ -2027,8 +2027,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosort"
-version = "0.6.2"
+name = "cleaner_ultra"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2051,6 +2051,7 @@ dependencies = [
  "walkdir",
  "winresource",
  "wry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

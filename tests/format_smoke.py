@@ -6,11 +6,11 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
 fixtures = root / 'build' / 'format-fixtures'
-magick = root / '.photosort' / 'tools' / 'magick' / 'magick.exe'
+magick = root / '.cleaner_ultra' / 'tools' / 'magick' / 'magick.exe'
 # HEIC writer in the portable codec build is intentionally read-only; generate with ffmpeg/libheif sample tests when available.
 def check(base):
     def request(route, body=None, token=''):
-        headers={'Content-Type':'application/json','X-PhotoSort-Token':token}
+        headers={'Content-Type':'application/json','X-CleanerUltra-Token':token}
         req=urllib.request.Request(base+route,headers=headers,data=None if body is None else json.dumps(body).encode())
         with urllib.request.urlopen(req,timeout=120) as response:
             return json.load(response)

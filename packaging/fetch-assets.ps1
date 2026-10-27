@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$toolRoot = Join-Path (Split-Path $PSScriptRoot -Parent) '.photosort\tools'
+$toolRoot = Join-Path (Split-Path $PSScriptRoot -Parent) '.cleaner_ultra\tools'
 New-Item -ItemType Directory -Force $toolRoot | Out-Null
 $webviewSetup = Join-Path $toolRoot 'MicrosoftEdgeWebview2Setup.exe'
 if (-not (Test-Path $webviewSetup)) { Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $webviewSetup }

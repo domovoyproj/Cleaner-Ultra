@@ -1,4 +1,4 @@
-# Проверка PhotoSort 0.3.0
+# Проверка CleanerUltra 0.3.0
 
 Проверено 8 октября 2026 года на Windows 11, Rust GNU 1.99; используется отдельная тестовая библиотека. Тестовые медиа создаются программно, пользовательские фото и видео не участвуют.
 
@@ -8,6 +8,6 @@
 - Python-регрессии: 13 тестов старого поведения 0.1. Проверки синтаксиса `app.js` и `face-worker.js`.
 - Проверка интерфейса в Chromium: импорт 6 контейнеров MP4/MOV/MKV/AVI/WebM/WMV и JPEG, фильтр «Видео», длительность/кодек/FPS и превью. WebM воспроизводится; WMV открывается после локальной подготовки совместимого превью. Два ролика запускаются синхронно. Home перематывает к началу, клавиши плеера не переключают файл. При закрытии одиночного просмотра и сравнения оба плеера приостанавливаются, источники снимаются.
 
-Команды: `cargo test --locked`, `cargo test --locked video_ -- --ignored`, `python -m unittest discover -s tests -v`, `node --check photosort/web/app.js`, `node --check photosort/web/face-worker.js`. `packaging/build.ps1` повторяет Rust-проверки в release-профиле и собирает дистрибутив с FFmpeg.
+Команды: `cargo test --locked`, `cargo test --locked video_ -- --ignored`, `python -m unittest discover -s tests -v`, `node --check cleaner_ultra/web/app.js`, `node --check cleaner_ultra/web/face-worker.js`. `packaging/build.ps1` повторяет Rust-проверки в release-профиле и собирает дистрибутив с FFmpeg.
 
 Поддержка форматов и пределы совместимого превью описаны в [VIDEO-0.3.md](VIDEO-0.3.md). Сходство по трём кадрам — эвристика; решение об удалении принимает пользователь, файлы перемещаются в восстанавливаемую корзину.

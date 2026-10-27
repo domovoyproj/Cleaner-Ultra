@@ -481,8 +481,16 @@ impl Library {
                 .into_iter()
                 .filter_entry(|entry| {
                     entry.depth() == 0
-                        || (![".photosort-trash", ".git", ".photosort", "target"]
-                            .contains(&entry.file_name().to_string_lossy().as_ref())
+                        || (![
+                            ".cleaner_ultra-trash",
+                            ".photosort-trash",
+                            ".photosort-space-trash",
+                            ".photosort",
+                            ".git",
+                            ".cleaner_ultra",
+                            "target",
+                        ]
+                        .contains(&entry.file_name().to_string_lossy().as_ref())
                             && !entry.path().starts_with(&self.data)
                             && !entry.path().is_symlink())
                 });
@@ -1107,7 +1115,14 @@ impl Library {
         }
         let root = fs::canonicalize(&photo.root).context("Исходная папка недоступна")?;
         let original = PathBuf::from(&photo.path);
-        let trash_dir = root.join(".photosort-trash");
+        let trash_dir = if restore {
+            crate::compat::media_vault(
+                &root,
+                Path::new(photo.trash.as_deref().context("Файл не в корзине")?),
+            )
+        } else {
+            root.join(".cleaner_ultra-trash")
+        };
         if trash_dir.exists()
             && (trash_dir.is_symlink() || fs::canonicalize(&trash_dir)? != trash_dir)
         {
@@ -1290,7 +1305,9 @@ impl Library {
             };
             let source = Path::new(&source);
             let target = Path::new(&destination);
-            let expected_trash = Path::new(&photo_record.root).join(".photosort-trash");
+            let trash_path = if kind == "trash" { target } else { source };
+            let expected_trash =
+                crate::compat::media_vault(Path::new(&photo_record.root), trash_path);
             let source_path = normal_path(source);
             let target_path = normal_path(target);
             let paths_valid = match kind.as_str() {
@@ -1713,6 +1730,7 @@ impl Library {
                 ));
             }
         }
+        let original_bytes = bytes;
         files.sort_by_key(|f| f.0);
         let mut removed = 0;
         for (_, size, path) in files {
@@ -1733,7 +1751,9 @@ impl Library {
             removed += 1
         }
         *self.cache_usage.lock() = CacheUsage { bytes, sizes };
-        Ok(json!({"bytes":bytes,"limit":budget,"removed":removed}))
+        Ok(
+            json!({"bytes":bytes,"freed_bytes":original_bytes.saturating_sub(bytes),"limit":budget,"removed":removed}),
+        )
     }
     pub fn status(&self) -> Result<Value> {
         let roots: Vec<String> = {
@@ -1834,7 +1854,10 @@ pub fn copy_exclusive(source: &Path, target: &Path, expected: &str) -> Result<()
 }
 fn copy_verified_atomic(source: &Path, target: &Path, expected: &str) -> Result<()> {
     let parent = target.parent().context("Некорректный путь экспорта")?;
-    let temporary = parent.join(format!(".photosort-export-{}.part", uuid::Uuid::new_v4()));
+    let temporary = parent.join(format!(
+        ".cleaner_ultra-export-{}.part",
+        uuid::Uuid::new_v4()
+    ));
     let result = (|| -> Result<()> {
         copy_exclusive(source, &temporary, expected)?;
         publish_verified(&temporary, target)

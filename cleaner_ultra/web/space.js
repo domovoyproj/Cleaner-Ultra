@@ -1,13 +1,16 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const names = {overview:"Обзор",map:"Карта диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Оптимизация дисков",trash:"Корзина"};
+const names = {maintenance:"Реестр и автозагрузка",apps:"Удаление программ",history:"История и отчёты",overview:"Обзор",map:"Карта диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Оптимизация дисков",trash:"Корзина"};
 const categories = {photos:"Изображения",video:"Видео",audio:"Аудио",archives:"Архивы и образы",documents:"Документы",apps:"Приложения",other:"Другое"};
 const headings = {
+  maintenance:["ОБСЛУЖИВАНИЕ WINDOWS","Порядок<br>в запуске<span>.</span>","Проверка реестра, контроль автозагрузки и возможность отменить изменение."],
+  apps:["ТОЛЬКО НУЖНЫЕ ПРОГРАММЫ","Меньше лишнего.<br>Больше места<span>.</span>","Найдите приложение и запустите его штатное удаление."],
+  history:["ПОНЯТНЫЙ РЕЗУЛЬТАТ","Что изменилось<span>.</span>","История операций, подробные итоги и локальные отчёты."],
   overview:["ПРОСТРАНСТВО ДЛЯ ВАЖНОГО","Место под вашим<br>контролем<span>.</span>","Узнайте, что занимает диск. Оставьте только нужное."],
   map:["УВИДЕТЬ БОЛЬШЕ","Карта пространства<span>.</span>","Увидеть объём. Найти лишнее. Сохранить важное."],
   large:["ВЕСОМЫЕ ПРИЧИНЫ ДЛЯ ПОРЯДКА","Большие файлы.<br>Большие возможности<span>.</span>","Самое объёмное — в начале списка. Каждый файл под вашим контролем."],
   cleanup:["ОСТАВИТЬ НУЖНОЕ","Свободнее диск.<br>Легче работать<span>.</span>","Проверьте кандидатов и выберите подходящий способ очистки."],
-  optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Дефрагментация HDD и подходящая оптимизация SSD средствами Windows."],
+  optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Собственный движок анализа и дефрагментации HDD."],
   trash:["ПРАВО ПЕРЕДУМАТЬ","Ничего важного<br>не потеряно<span>.</span>","Проверьте сохранённые файлы и восстановите нужные."],
 };
 const state = {token:"",page:"overview",info:null,drive:null,mode:"large",offset:0,search:"",category:"",folder:"",mapPath:"",mapOffset:0,selected:new Map(),files:[],scan:0,total:0,busy:false,running:false,fileRequest:0,mapRequest:0,trashOffset:0};
@@ -19,7 +22,7 @@ const node = (tag,cls,text) => { const n=document.createElement(tag);if(cls)n.cl
 let toastTimer, searchTimer;
 function toast(text) {$("#toast").textContent=text;$("#toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("#toast").hidden=true,9000);}
 async function api(path,body) {
-  const r=await fetch(path,body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json","X-PhotoSort-Token":state.token},body:JSON.stringify(body)});
+  const r=await fetch(path,body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json","X-CleanerUltra-Token":state.token},body:JSON.stringify(body)});
   const d=await r.json();if(!r.ok)throw Error(d.error||"Не удалось выполнить действие");return d;
 }
 async function action(fn) {if(state.busy)return;state.busy=true;document.body.classList.add("busy");try{return await fn();}catch(e){toast(e.message);}finally{state.busy=false;document.body.classList.remove("busy");}}
@@ -61,7 +64,7 @@ async function refresh() {
   if(previous!==state.scan){state.selected.clear();state.offset=0;state.mapPath="";state.mapOffset=0;state.folder="";}
   if(!state.drive||!info.drives.some(d=>d.path===state.drive))state.drive=info.drives[0]?.path;
   $("#drives").replaceChildren(...info.drives.map(d=>{
-    const b=node("button","drive-tab");b.dataset.drive=d.path;b.append(window.PhotoSortIcons.create("drive"),node("span","",`Диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно`));b.onclick=()=>{state.drive=d.path;renderDrive();};return b;
+    const b=node("button","drive-tab");b.dataset.drive=d.path;b.append(window.CleanerUltraIcons.create("drive"),node("span","",`Диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно`));b.onclick=()=>{state.drive=d.path;renderDrive();};return b;
   }));
   renderDrive();progress(info.progress);
   $("#exclusion-count").textContent=num(info.exclusion_count);
@@ -107,6 +110,7 @@ async function go(page,options={}) {
   if(page==="large"){if(state.mode==="temporary"){$("#page-title").textContent="Временное — на проверку.";$("#page-description").textContent="Файлы TEMP старше 7 дней. Ничего не выбрано заранее.";}await loadFiles();}
   if(page==="map")await loadMap();
   if(page==="trash")await loadTrash();
+  if(window.CleanerUltraMaintenance)await window.CleanerUltraMaintenance.open(page);
   window.scrollTo({top:0,behavior:"instant"});
 }
 $$("[data-page]").forEach(b=>b.onclick=()=>action(()=>go(b.dataset.page)));
@@ -126,9 +130,9 @@ function renderExclusions() {
   $("#exclusion-list").replaceChildren(...exclusionPaths.map((path,index)=>{
     const row=node("div","exclusion-row"),copy=node("div","exclusion-copy");copy.dataset.plainText="";
     copy.append(node("strong","",basename(path)),node("small","",path));copy.title=path;
-    const remove=node("button","icon-button");remove.type="button";remove.setAttribute("aria-label",`Убрать исключение ${path}`);remove.title="Убрать исключение";remove.append(window.PhotoSortIcons.create("close"));
+    const remove=node("button","icon-button");remove.type="button";remove.setAttribute("aria-label",`Убрать исключение ${path}`);remove.title="Убрать исключение";remove.append(window.CleanerUltraIcons.create("close"));
     remove.onclick=()=>exclusionAction(()=>saveExclusions(exclusionPaths.filter((_,i)=>i!==index)));
-    row.append(window.PhotoSortIcons.create("shield"),copy,remove);return row;
+    row.append(window.CleanerUltraIcons.create("shield"),copy,remove);return row;
   }));
   if(!exclusionPaths.length)$("#exclusion-list").append(empty("Исключений пока нет.<br>Добавьте папки, которые не нужно анализировать."));
   exclusionControls();
@@ -181,11 +185,11 @@ $("#quarantine-selected").onclick=()=>{
 };
 $("#confirm-move").onclick=()=>action(async()=>{
   $("#confirm-move").disabled=true;
-  try{toast("Проверяем содержимое и переносим файлы. Это может занять время…");const r=await api("/api/space/trash",{ids:[...state.selected.keys()],scan:state.scan});$("#confirm-dialog").close();state.selected.clear();await refresh();toast(`Перемещено: ${num(r.done)}.${r.errors.length?" Ошибок: "+num(r.errors.length)+". "+r.errors[0].message:" Файлы можно восстановить в корзине PhotoSort."}`);}finally{$("#confirm-move").disabled=false;}
+  try{toast("Проверяем содержимое и переносим файлы. Это может занять время…");const r=await api("/api/space/trash",{ids:[...state.selected.keys()],scan:state.scan});$("#confirm-dialog").close();state.selected.clear();await refresh();window.CleanerUltraMaintenance?.result("Файлы перенесены в корзину",r);toast(`Перемещено: ${num(r.done)}.${r.errors.length?" Ошибок: "+num(r.errors.length)+". "+r.errors[0].message:" Файлы можно восстановить в корзине Cleaner Ultra."}`);}finally{$("#confirm-move").disabled=false;}
 });
 const mapView={data:null,selected:null,zoom:1,x:0,y:0,drag:null,moved:false};
 const mapIcon=f=>f.kind==="folder"?"folder":({video:"video",photos:"image",audio:"audio",archives:"archive"}[f.category]||"file");
-const svg=name=>window.PhotoSortIcons.create(name);
+const svg=name=>window.CleanerUltraIcons.create(name);
 async function openMap(path) {state.mapPath=path;state.mapOffset=0;mapView.selected=null;fitMap();await loadMap();}
 async function loadMap() {
   const request=++state.mapRequest;
@@ -228,7 +232,7 @@ function renderTreemap(){
   const map=$("#treemap"),d=mapView.data;map.replaceChildren();if(!d)return;
   const values=[...d.tiles];if(d.remainder.bytes>0)values.push({path:"__remainder__",bytes:d.remainder.bytes,files:d.remainder.count,remainder:true});
   const viewport=$("#map-viewport"),w=viewport.clientWidth*mapView.zoom,h=viewport.clientHeight*mapView.zoom;
-  const tiles=window.PhotoSortMap.layout(values,w,h);
+  const tiles=window.CleanerUltraMap.layout(values,w,h);
   if(!tiles.length){map.append(empty(state.scan?"В этой папке нет данных для карты. Откройте другую папку или обновите анализ.":"Карта появится после анализа. Нажмите «Анализировать диск» или выберите папку."));return;}
   tiles.forEach((f,i)=>{const b=node("button",`map-block ${f.kind==="folder"?"folder-block":"file-block"}${f.remainder?" remainder-block":""}`);b.dataset.path=f.path;
     Object.assign(b.style,{left:`${f.x/w*100}%`,top:`${f.y/h*100}%`,width:`${f.w/w*100}%`,height:`${f.h/h*100}%`,"--tile-tone":String(i%4)});
@@ -262,9 +266,13 @@ $("#trash-next").onclick=()=>action(async()=>{state.trashOffset+=60;await loadTr
 function renderOptimizer(drives) {
   $("#optimizer-drives").replaceChildren(...drives.filter(d=>d.optimizable).map(d=>{const r=node("div","optimizer-row");const copy=node("div","drive-name");copy.append(node("strong","",`Локальный диск ${d.path.replaceAll("\\","")}`),node("small","",`${bytes(d.free)} свободно из ${bytes(d.total)} · тип носителя определит Windows`));const a=node("button","button secondary","Анализировать");a.onclick=()=>openOptimize(d,true);const b=node("button","button primary","Оптимизировать ↗");b.onclick=()=>openOptimize(d,false);r.append(node("span","","▱"),copy,a,b);return r;}));if(!drives.some(d=>d.optimizable))$("#optimizer-drives").append(empty("Нет доступных локальных дисков для оптимизации."));
 }
-function openOptimize(drive,analyze){$("#optimize-title").textContent=`${analyze?"Анализировать":"Оптимизировать"} ${drive.path.replaceAll("\\","")}?`;$("#optimize-description").textContent=analyze?"Windows проверит состояние файловой системы и фрагментацию выбранного диска. Анализ не удаляет файлы.":"Для HDD Windows выполнит подходящую дефрагментацию, для SSD выберет оптимизацию по типу носителя. Эта операция может занять продолжительное время.";$("#confirm-optimize").onclick=()=>action(async()=>{const r=await api("/api/space/optimize",{drive:drive.path.slice(0,2),analyze});$("#optimize-dialog").close();toast(r.message);});$("#optimize-dialog").showModal();}
+function openOptimize(drive,analyze){
+  $("#optimize-title").textContent=`${analyze?"Проверить фрагментацию":"Дефрагментировать"} ${drive.path.slice(0,2)}?`;
+  $("#optimize-description").textContent=analyze?"Cleaner Ultra прочитает карту экстентов файлов из завершённого снимка анализа выбранного диска. Содержимое файлов не изменяется.":"Встроенный движок переместит кластеры доступных файлов HDD средствами ядра Windows и сверит SHA-256. SSD, системные, занятые и неподдерживаемые файлы пропускаются.";
+  $("#confirm-optimize").onclick=()=>action(async()=>{await api("/api/space/optimize",{drive:drive.path.slice(0,2),analyze,confirmed:true});$("#optimize-dialog").close();await window.CleanerUltraMaintenance?.optimizer();toast("Операция запущена внутри Cleaner Ultra");});$("#optimize-dialog").showModal();
+}
 $$("[data-system]").forEach(b=>b.onclick=()=>action(async()=>{await api("/api/space/system",{page:b.dataset.system});toast("Открыт системный инструмент Windows");}));
-const desktop=Boolean(window.__PHOTOSORT_DESKTOP__&&window.ipc?.postMessage);
+const desktop=Boolean(window.__CLEANER_ULTRA_DESKTOP__&&window.ipc?.postMessage);
 $("#admin-button").onclick=()=>$("#admin-dialog").showModal();
 $("#confirm-admin").onclick=()=>{if(desktop){$("#admin-dialog").close();window.ipc.postMessage("elevate");}};
 $$("[data-window-command]").forEach(b=>{b.disabled=!desktop;b.onclick=()=>window.ipc?.postMessage(b.dataset.windowCommand);});

@@ -1,5 +1,9 @@
 pub mod analysis;
+pub mod apps;
+pub mod compat;
 pub mod library;
+pub mod maintenance;
+pub mod optimizer;
 pub mod server;
 pub mod space;
 pub mod video;

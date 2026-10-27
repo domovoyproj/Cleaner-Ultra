@@ -17,12 +17,17 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
     let space = crate::space::Space::open(&library.data)?;
+    let maintenance = Arc::new(crate::maintenance::Maintenance::open(&library.data)?);
     let server =
         Arc::new(Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!(e.to_string()))?);
     let address = server.server_addr().to_ip().unwrap();
     let host = address.to_string();
     let url = format!("http://{host}");
     let token = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
+    let apps = Arc::new(crate::apps::Apps::default());
+    let optimizer = Arc::new(crate::optimizer::Optimizer::with_history(
+        maintenance.clone(),
+    ));
     let streams = Arc::new(AtomicUsize::new(0));
     // Bounded request workers prevent full-resolution previews exhausting memory.
     for _ in 0..4 {
@@ -32,9 +37,13 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
         let host = host.clone();
         let streams = streams.clone();
         let space = space.clone();
+        let maintenance = maintenance.clone();
+        let apps = apps.clone();
+        let optimizer = optimizer.clone();
         thread::spawn(move || {
             loop {
                 if library.is_closed() {
+                    optimizer.stop();
                     space.close();
                     break;
                 }
@@ -51,7 +60,7 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
                     allowed &= request
                         .headers()
                         .iter()
-                        .any(|h| h.field.equiv("X-PhotoSort-Token") && h.value.as_str() == token)
+                        .any(|h| h.field.equiv("X-CleanerUltra-Token") && h.value.as_str() == token)
                 }
                 if !allowed {
                     respond(
@@ -88,7 +97,15 @@ pub fn serve(library: Arc<Library>, port: u16) -> Result<String> {
                     }
                     continue;
                 }
-                let result = route(&library, &space, &token, &mut request);
+                let result = route(
+                    &library,
+                    &space,
+                    &maintenance,
+                    &apps,
+                    &optimizer,
+                    &token,
+                    &mut request,
+                );
                 match result {
                     Ok((bytes, mime)) => respond(request, bytes, &mime, 200),
                     Err(error) => respond(
@@ -247,15 +264,23 @@ impl<T> ContextOption<T> for Option<T> {
 fn route(
     library: &Arc<Library>,
     space: &Arc<crate::space::Space>,
+    maintenance: &crate::maintenance::Maintenance,
+    apps: &crate::apps::Apps,
+    optimizer: &Arc<crate::optimizer::Optimizer>,
     token: &str,
     request: &mut Request,
 ) -> Result<(Vec<u8>, String)> {
+    let started = std::time::Instant::now();
     let url = url::Url::parse(&format!("http://127.0.0.1{}", request.url()))?;
     let path = url.path();
     let parameters: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     let get = |name: &str, default: &str| parameters.get(name).cloned().unwrap_or(default.into());
-    let value = if *request.method() == Method::Get {
+    let mut value = if *request.method() == Method::Get {
         match path {
+            "/api/apps" => apps.list()?,
+            "/api/optimizer/status" => optimizer.status(),
+            "/api/history" => maintenance.history()?,
+            "/api/maintenance/backups" => maintenance.backups()?,
             "/api/space/status" => {
                 let mut info = space.status()?;
                 info["theme"] = json!(library.settings().theme);
@@ -301,73 +326,85 @@ fn route(
             }
             "/" => {
                 return Ok((
-                    include_bytes!("../photosort/web/space.html").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/space.html").to_vec(),
                     "text/html; charset=utf-8".into(),
+                ));
+            }
+            "/maintenance.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/maintenance.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/maintenance.css" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/maintenance.css").to_vec(),
+                    "text/css; charset=utf-8".into(),
                 ));
             }
             "/space.js" => {
                 return Ok((
-                    include_bytes!("../photosort/web/space.js").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/space.js").to_vec(),
                     "text/javascript; charset=utf-8".into(),
                 ));
             }
             "/icons.js" => {
                 return Ok((
-                    include_bytes!("../photosort/web/icons.js").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/icons.js").to_vec(),
                     "text/javascript; charset=utf-8".into(),
                 ));
             }
             "/space-refined.css" => {
                 return Ok((
-                    include_bytes!("../photosort/web/space-refined.css").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/space-refined.css").to_vec(),
                     "text/css; charset=utf-8".into(),
                 ));
             }
             "/map-layout.js" => {
                 return Ok((
-                    include_bytes!("../photosort/web/map-layout.js").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/map-layout.js").to_vec(),
                     "text/javascript; charset=utf-8".into(),
                 ));
             }
             "/space.css" => {
                 return Ok((
-                    include_bytes!("../photosort/web/space.css").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/space.css").to_vec(),
                     "text/css; charset=utf-8".into(),
                 ));
             }
             "/photos" => {
                 return Ok((
-                    include_bytes!("../photosort/web/index.html").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/index.html").to_vec(),
                     "text/html; charset=utf-8".into(),
                 ));
             }
             "/app.js" => {
                 return Ok((
-                    include_bytes!("../photosort/web/app.js").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/app.js").to_vec(),
                     "text/javascript; charset=utf-8".into(),
                 ));
             }
             "/icon.ico" => {
                 return Ok((
-                    include_bytes!("../packaging/photosort.ico").to_vec(),
+                    include_bytes!("../packaging/cleaner_ultra.ico").to_vec(),
                     "image/x-icon".into(),
                 ));
             }
             "/style.css" => {
                 return Ok((
-                    include_bytes!("../photosort/web/style.css").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/style.css").to_vec(),
                     "text/css; charset=utf-8".into(),
                 ));
             }
             "/update.css" => {
                 return Ok((
-                    include_bytes!("../photosort/web/update.css").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/update.css").to_vec(),
                     "text/css; charset=utf-8".into(),
                 ));
             }
             "/face-worker.js" => {
                 return Ok((
-                    include_bytes!("../photosort/web/face-worker.js").to_vec(),
+                    include_bytes!("../cleaner_ultra/web/face-worker.js").to_vec(),
                     "text/javascript; charset=utf-8".into(),
                 ));
             }
@@ -397,7 +434,7 @@ fn route(
                 let root = if root.exists() {
                     root
                 } else {
-                    Path::new(".photosort/tools/vision").to_path_buf()
+                    Path::new(".cleaner_ultra/tools/vision").to_path_buf()
                 };
                 let mime = match relative.extension().and_then(|e| e.to_str()) {
                     Some("wasm") => "application/wasm",
@@ -419,6 +456,26 @@ fn route(
         };
         let body: Value = serde_json::from_slice(if bytes.is_empty() { b"{}" } else { &bytes })?;
         match path {
+            "/api/maintenance/scan" => maintenance.scan()?,
+            "/api/maintenance/apply" => {
+                if body["confirmed"].as_bool() != Some(true) {
+                    bail!("Подтвердите выбранные изменения");
+                }
+                let selected = body["ids"]
+                    .as_array()
+                    .context_or("Выберите записи")?
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .context_or("Некорректный идентификатор")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                maintenance.apply(&selected, body["action"].as_str().unwrap_or(""))?
+            }
+            "/api/maintenance/restore" => {
+                maintenance.restore(body["id"].as_str().context_or("Выберите резервную копию")?)?
+            }
             "/api/space/theme" => {
                 let theme = body["theme"].as_str().context_or("Выберите тему")?;
                 if !["light", "dark", "system"].contains(&theme) {
@@ -464,10 +521,24 @@ fn route(
             "/api/space/reveal-trash" => {
                 space.reveal_trash(body["id"].as_i64().context_or("Выберите файл")?)?
             }
-            "/api/space/optimize" => crate::space::optimize_drive(
-                body["drive"].as_str().unwrap_or(""),
-                body["analyze"].as_bool().unwrap_or(false),
-            )?,
+            "/api/space/optimize" => {
+                if body["confirmed"].as_bool() != Some(true) {
+                    bail!("Подтвердите операцию");
+                }
+                let drive = body["drive"].as_str().unwrap_or("");
+                optimizer.start(
+                    drive,
+                    body["analyze"].as_bool().unwrap_or(true),
+                    space.optimization_paths(drive)?,
+                )?
+            }
+            "/api/optimizer/stop" => optimizer.stop(),
+            "/api/apps/uninstall" => {
+                if body["confirmed"].as_bool() != Some(true) {
+                    bail!("Подтвердите удаление");
+                }
+                apps.uninstall(body["id"].as_str().context_or("Выберите приложение")?)?
+            }
             "/api/space/system" => crate::space::system_page(body["page"].as_str().unwrap_or(""))?,
             "/api/scan" => {
                 library.start(body["path"].as_str().unwrap_or(""), false)?;
@@ -555,6 +626,20 @@ fn route(
     } else {
         bail!("Метод не поддерживается")
     };
+    if *request.method() == Method::Post
+        && [
+            "/api/space/trash",
+            "/api/space/restore",
+            "/api/maintenance/apply",
+            "/api/maintenance/restore",
+            "/api/apps/uninstall",
+            "/api/cache",
+        ]
+        .contains(&path)
+    {
+        value["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+        value["history_saved"] = json!(maintenance.record(path, &value).is_ok());
+    }
     Ok((
         serde_json::to_vec(&value)?,
         "application/json; charset=utf-8".into(),

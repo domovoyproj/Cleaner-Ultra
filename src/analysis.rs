@@ -41,7 +41,7 @@ pub fn fingerprint(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 pub fn decoder_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PHOTOSORT_MAGICK") {
+    if let Some(path) = std::env::var_os("CLEANER_ULTRA_MAGICK") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Some(path);
@@ -50,7 +50,7 @@ pub fn decoder_path() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?.parent()?.to_path_buf();
     [
         executable.join("codecs/magick.exe"),
-        PathBuf::from(".photosort/tools/magick/magick.exe"),
+        PathBuf::from(".cleaner_ultra/tools/magick/magick.exe"),
     ]
     .into_iter()
     .find(|p| p.is_file())

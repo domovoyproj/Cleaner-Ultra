@@ -9,7 +9,7 @@ raw = np.fromfunction(lambda y, x: 800 + x * 80 + y * 40, (128, 128), dtype=int)
 tags = [
     (50706, 'B', 4, (1, 4, 0, 0), False),
     (50707, 'B', 4, (1, 1, 0, 0), False),
-    (50708, 's', 0, 'PhotoSort Synthetic Camera', False),
+    (50708, 's', 0, 'CleanerUltra Synthetic Camera', False),
     (33421, 'H', 2, (2, 2), False),
     (33422, 'B', 4, (0, 1, 1, 2), False),
     (50710, 'B', 3, (0, 1, 2), False),

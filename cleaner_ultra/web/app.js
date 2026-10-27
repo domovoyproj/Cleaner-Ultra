@@ -1,6 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const desktopWindow = Boolean(
-  window.__PHOTOSORT_DESKTOP__ && window.ipc?.postMessage,
+  window.__CLEANER_ULTRA_DESKTOP__ && window.ipc?.postMessage,
 );
 function windowCommand(command) {
   if (desktopWindow) window.ipc.postMessage(command);
@@ -127,7 +127,7 @@ async function api(path, body) {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-PhotoSort-Token": state.token,
+            "X-CleanerUltra-Token": state.token,
           },
           body: JSON.stringify(body),
         },
@@ -375,7 +375,7 @@ async function load() {
         ? "Корзина пуста"
         : "Здесь пока нет файлов";
     $("#empty-description").textContent = first
-      ? "Добавьте фотографии и видео. PhotoSort найдёт дубли и похожие файлы и поможет оставить самое ценное."
+      ? "Добавьте фотографии и видео. CleanerUltra найдёт дубли и похожие файлы и поможет оставить самое ценное."
       : state.view === "trash"
         ? "Перемещённые сюда файлы можно восстановить в исходную папку."
         : "Попробуйте другой поиск или добавьте файлы в библиотеку.";

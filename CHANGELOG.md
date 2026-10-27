@@ -58,7 +58,7 @@
 
 - Окно без стандартного заголовка Windows: три монохромные кнопки закрытия, сворачивания и разворачивания.
 - Перемещение за верхнюю панель и изменение размера за края окна.
-- Значок PhotoSort встроен в EXE, окно и браузерную вкладку.
+- Значок CleanerUltra встроен в EXE, окно и браузерную вкладку.
 
 ## 0.2.0
 
@@ -75,3 +75,7 @@
 ## 0.1.0
 
 Первая предварительная версия для Windows: монохромный интерфейс, локальное индексирование, точные дубли SHA-256, визуальная группировка, серии EXIF, избранное, сравнение двух кадров, восстанавливаемая корзина, установщик и portable-сборка.
+
+## 0.7.0 — Cleaner Ultra (development)
+
+Rebrand the runtime, UI, packaging and docs; preserve legacy data and trash recovery. Add recoverable HKCU startup registry maintenance, installed Win32 application removal, in-process NTFS HDD analysis/defragmentation, operation summaries, persistent history and JSON reports. See docs/RELEASE-0.7.md for scope and validation limits. Native cluster relocation and desktop visual QA remain release gates.

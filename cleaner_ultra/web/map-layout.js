@@ -14,5 +14,5 @@
     }
     divide(values,0,0,width,height,total);return result;
   }
-  const api={layout};if(typeof module!=="undefined"&&module.exports)module.exports=api;else globalThis.PhotoSortMap=api;
+  const api={layout};if(typeof module!=="undefined"&&module.exports)module.exports=api;else globalThis.CleanerUltraMap=api;
 })();

@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict');
 const test=require('node:test');
-const {layout}=require('../photosort/web/map-layout.js');
+const {layout}=require('../cleaner_ultra/web/map-layout.js');
 for(const [w,h] of [[1000,450],[340,600],[1,1]])test(`map proportions and bounds ${w}x${h}`,()=>{
  const values=[1000000,3000,1500,100,20,1].map((bytes,i)=>({bytes,path:String(i)}));
  const tiles=layout(values,w,h),sum=values.reduce((n,v)=>n+v.bytes,0);

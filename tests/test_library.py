@@ -10,8 +10,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from photosort.library import BKTree, Library, fingerprint
-from photosort.server import make_server
+from cleaner_ultra.library import BKTree, Library, fingerprint
+from cleaner_ultra.server import make_server
 
 
 class LibraryTests(unittest.TestCase):
@@ -82,7 +82,7 @@ class LibraryTests(unittest.TestCase):
 
     def test_corrupt_file_and_trash_are_skipped(self):
         self.photo()
-        self.photo('.photosort-trash/ignored.jpg')
+        self.photo('.cleaner_ultra-trash/ignored.jpg')
         (self.root / 'broken.jpg').write_bytes(b'broken')
         self.scan()
         self.assertEqual(self.library.listing()['total'], 1)
@@ -116,7 +116,7 @@ class LibraryTests(unittest.TestCase):
     def test_operation_recovery_after_move(self):
         path = self.photo()
         photo = self.scan()[0]
-        destination = self.root / '.photosort-trash' / 'recovery.jpg'
+        destination = self.root / '.cleaner_ultra-trash' / 'recovery.jpg'
         destination.parent.mkdir()
         with self.library.connect() as db:
             db.execute('INSERT INTO operations(photo,source,destination,kind) VALUES(?,?,?,?)',
@@ -164,7 +164,7 @@ class LibraryTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(request)
             self.assertEqual(error.exception.code, 403)
-            request.add_header('X-PhotoSort-Token', token)
+            request.add_header('X-CleanerUltra-Token', token)
             with urllib.request.urlopen(request) as response:
                 self.assertTrue(json.load(response)['ok'])
             request = urllib.request.Request(url + '/', headers={'Host': 'evil.example'})
