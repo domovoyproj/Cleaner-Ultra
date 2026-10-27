@@ -102,6 +102,7 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
         "/cleanup-ui.js",
         "/disk-tree.js",
         "/design09.css",
+        "/desktop.css",
         "/api/cleanup/catalog",
         "/api/cleanup/progress",
         "/api/cleanup/files",
@@ -120,7 +121,7 @@ fn maintenance_routes_require_auth_confirmation_and_server_issued_ids() {
     assert!(html.contains("data-page=\"registry\""));
     assert!(html.contains("data-page=\"startup\""));
     assert!(html.contains("Ускорить и очистить"));
-    assert!(html.contains("Удаление программ"));
+    assert!(html.contains("id=\"apps-search\""));
     assert!(html.contains("Дерево диска"));
     assert!(html.contains("Кеш браузеров"));
     assert!(html.contains("Временные файлы Windows"));

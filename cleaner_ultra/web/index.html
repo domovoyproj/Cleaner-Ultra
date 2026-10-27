@@ -7,42 +7,15 @@
     <link rel="icon" href="/icon.ico" />
     <link rel="stylesheet" href="/style.css" />
     <link rel="stylesheet" href="/update.css" />
+    <link rel="stylesheet" href="/desktop.css" />
     <script src="/app.js" defer></script>
     <script src="/icons.js" defer></script>
 </head>
-  <body>
+  <body class="ultra-media">
+    <div class="desktop-titlebar"><div class="app-caption"><span data-icon="bolt"></span><strong>Cleaner Ultra</strong><span class="app-build">DESKTOP</span></div><div class="window-dots" aria-label="Управление окном"><button data-window-command="minimize" aria-label="Свернуть окно">−</button><button data-window-command="maximize" aria-label="Развернуть окно"><span data-icon="window"></span></button><button data-window-command="close" aria-label="Закрыть окно">×</button></div></div>
     <aside class="sidebar">
-      <div class="window-dots" role="group" aria-label="Управление окном">
-        <button
-          type="button"
-          data-window-command="close"
-          aria-label="Закрыть окно"
-          title="Закрыть окно"
-          disabled
-        >
-          <span aria-hidden="true">×</span>
-        </button>
-        <button
-          type="button"
-          data-window-command="minimize"
-          aria-label="Свернуть окно"
-          title="Свернуть окно"
-          disabled
-        >
-          <span aria-hidden="true">−</span>
-        </button>
-        <button
-          type="button"
-          data-window-command="maximize"
-          aria-label="Развернуть / восстановить окно"
-          title="Развернуть / восстановить окно"
-          disabled
-        >
-          <span aria-hidden="true">↗</span>
-        </button>
-      </div>
       <a class="brand" href="/" aria-label="Cleaner Ultra — обзор дисков"
-        ><span class="brand-icon" aria-hidden="true">◈</span><span class="brand-name">Cleaner Ultra</span><span class="version">06</span></a
+        ><span class="brand-icon" aria-hidden="true"><span data-icon="bolt"></span></span><span class="brand-name">Cleaner Ultra</span><span class="version">0.10</span></a
       >
       <div class="workspace">
         <span class="workspace-icon">▧</span>

@@ -406,6 +406,12 @@ fn route(
                     "text/css; charset=utf-8".into(),
                 ));
             }
+            "/desktop.css" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/desktop.css").to_vec(),
+                    "text/css; charset=utf-8".into(),
+                ));
+            }
             "/design09.css" => {
                 return Ok((
                     include_bytes!("../cleaner_ultra/web/design09.css").to_vec(),

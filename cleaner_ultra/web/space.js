@@ -1,20 +1,20 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const names = {startup:"Автозагрузка",registry:"Реестр",wizard:"Ускорить и очистить",performance:"Производительность",apps:"Удаление программ",history:"История и отчёты",overview:"Обзор",map:"Дерево диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Оптимизация дисков",trash:"Корзина"};
+const names = {startup:"Автозагрузка",registry:"Реестр",wizard:"Мастер очистки",performance:"Производительность",apps:"Удаление программ",history:"История и отчёты",overview:"Обзор",map:"Дерево диска",large:"Крупные файлы",cleanup:"Очистка",optimize:"Диски и TRIM",trash:"Корзина"};
 const categories = {photos:"Изображения",video:"Видео",audio:"Аудио",archives:"Архивы и образы",documents:"Документы",apps:"Приложения",other:"Другое"};
 const headings = {
-  startup:["БЫСТРЕЕ К РАБОТЕ","Порядок<br>в запуске<span>.</span>","Программы при входе в Windows. Уберите несуществующие пути или отключите выбранные."],
-  registry:["ОБСЛУЖИВАНИЕ WINDOWS","Чистые ссылки<span>.</span>","Отдельная проверка битых путей реестра с резервными копиями."],
-  wizard:["ОДНО ПРОХОЖДЕНИЕ","Ускорить<br>и очистить<span>.</span>","Выберите режимы. Проверьте общий список. Примените одним действием."],
-  performance:["РЕСУРСЫ КОМПЬЮТЕРА","Найти причину<span>.</span>","Загрузка CPU и RAM, ресурсоёмкие процессы и схемы питания Windows."],
-  apps:["ТОЛЬКО НУЖНЫЕ ПРОГРАММЫ","Меньше лишнего.<br>Больше места<span>.</span>","Найдите приложение и запустите его штатное удаление."],
-  history:["ПОНЯТНЫЙ РЕЗУЛЬТАТ","Что изменилось<span>.</span>","История операций, подробные итоги и локальные отчёты."],
-  overview:["ПРОСТРАНСТВО ДЛЯ ВАЖНОГО","Место под вашим<br>контролем<span>.</span>","Узнайте, что занимает диск. Оставьте только нужное."],
-  map:["УВИДЕТЬ БОЛЬШЕ","Диск по ветвям<span>.</span>","Раскройте папки. Сравните объёмы. Оставьте важное."],
-  large:["ВЕСОМЫЕ ПРИЧИНЫ ДЛЯ ПОРЯДКА","Большие файлы.<br>Большие возможности<span>.</span>","Самое объёмное — в начале списка. Каждый файл под вашим контролем."],
-  cleanup:["ОСТАВИТЬ НУЖНОЕ","Свободнее диск.<br>Легче работать<span>.</span>","Проверьте кандидатов и выберите подходящий способ очистки."],
-  optimize:["БОЛЬШЕ ПОРЯДКА ВНУТРИ","Диск в хорошей<br>форме<span>.</span>","Дефрагментация HDD и TRIM свободных блоков SSD внутри приложения."],
-  trash:["ПРАВО ПЕРЕДУМАТЬ","Ничего важного<br>не потеряно<span>.</span>","Проверьте сохранённые файлы и восстановите нужные."],
+  startup:["СИСТЕМА","Автозагрузка","Программы при входе в Windows. Отключайте только то, что вам не нужно."],
+  registry:["СИСТЕМА","Реестр","Проверка битых ссылок с резервной копией каждого изменения."],
+  wizard:["ОБСЛУЖИВАНИЕ","Мастер очистки","Выберите категории → проверьте список → примените изменения."],
+  performance:["СИСТЕМА","Производительность","Загрузка ресурсов, процессы и схемы питания Windows."],
+  apps:["СИСТЕМА","Установленные программы","Найдите приложение и запустите его штатное удаление."],
+  history:["БИБЛИОТЕКА","История и отчёты","Результаты обслуживания, объём переноса и подробности операций."],
+  overview:["ВАШ КОМПЬЮТЕР","Обзор системы","Пространство, обслуживание и ваши последние результаты."],
+  map:["ПРОСТРАНСТВО","Дерево диска","Раскройте папки и найдите то, что занимает место."],
+  large:["ПРОСТРАНСТВО","Крупные файлы","Самые объёмные файлы — в начале списка."],
+  cleanup:["ПРОСТРАНСТВО","Очистка пространства","Выберите подходящий инструмент и просмотрите найденные файлы."],
+  optimize:["СИСТЕМА","Диски и TRIM","Встроенное обслуживание HDD и свободных блоков SSD."],
+  trash:["БИБЛИОТЕКА","Восстановление файлов","Перенесённые файлы сохраняются на исходном диске."],
 };
 const state = {token:"",page:"overview",info:null,drive:null,mode:"large",offset:0,search:"",category:"",folder:"",mapPath:"",mapOffset:0,selected:new Map(),files:[],scan:0,total:0,busy:false,running:false,fileRequest:0,mapRequest:0,trashOffset:0};
 const num = (v) => Number(v||0).toLocaleString("ru-RU");
@@ -59,6 +59,8 @@ function renderDrive() {
   $("#capacity-total").textContent=`из ${bytes(drive.total)}`;
   $("#capacity-free").textContent=bytes(drive.free);
   $("#capacity-percent").textContent=`${percent}%`;
+  $("#capacity-ring-fill").style.strokeDashoffset=String(314.159*(1-percent/100));
+  $(".capacity-card").classList.toggle("is-full",percent>=90);
   $("#capacity-track span").style.width=`${percent}%`;
   $("#capacity-state").textContent=percent>=90?"Почти заполнен":"Подключён";
   $("#capacity-hint").textContent=percent>=90?"Мало свободного места — начните с крупных файлов":"Фактическое использование тома по данным Windows";
@@ -85,7 +87,9 @@ async function refresh() {
   $("#cleanup-large").textContent=state.scan?bytes(info.large.bytes):"—";
   $("#cleanup-count").textContent=num(info.temporary.files);
   $("#trash-count").textContent=num(info.trash.files+(info.cleanup_trash_files||0));
-  if(state.scan){$("#opportunity-title").textContent=info.large.files?`${bytes(info.large.bytes)} для внимательного взгляда.`:"Пространство стало понятнее.";$("#opportunity-copy").textContent=info.large.files?`Крупных файлов вне системных папок: ${num(info.large.files)}. Посмотрите, что ещё нужно, а с чем пора расстаться.`:"Откройте карту папок или системную очистку, чтобы выбрать следующий шаг.";}
+  $("#overview-file-count").textContent=state.scan?num(info.progress.files):"—";
+  $("#overview-scan-size").textContent=state.scan?bytes(info.progress.bytes):"—";
+  $("#overview-trash-files").textContent=`${num(info.trash.files+(info.cleanup_trash_files||0))} файлов`;
   renderCategories(info.categories);
   renderOptimizer(info.drives);
   const top=await api("/api/space/files?mode=all&offset=0");
@@ -101,14 +105,14 @@ function empty(message) {const n=node("div","empty-note");for(const [i,line]of m
 function fileIcon(path) {return node("span","file-symbol",(path.split(".").pop()||"FILE").toUpperCase().slice(0,4));}
 function renderCategories(values) {
   const total=values.reduce((sum,v)=>sum+v.bytes,0);
-  $("#category-bars").replaceChildren(...values.map(v=>{const r=node("div","category-row");const track=node("span","category-bar");const fill=node("i");fill.style.width=`${total?v.bytes/total*100:0}%`;track.append(fill);r.append(node("span","",categories[v.category]||v.category),track,node("span","",bytes(v.bytes)));return r;}));
+  $("#category-bars").replaceChildren(...values.map(v=>{const r=node("div","category-row");r.dataset.category=v.category;const track=node("span","category-bar");const fill=node("i");fill.style.width=`${total?v.bytes/total*100:0}%`;track.append(fill);r.append(node("span","",categories[v.category]||v.category),track,node("span","",bytes(v.bytes)));return r;}));
   if(!values.length)$("#category-bars").append(empty("Категории появятся после анализа."));
 }
 async function go(page,options={}) {
-  if(!names[page])return;state.page=page;document.body.classList.toggle("view-map",page==="map");if(page!=="map")document.body.classList.remove("map-focus");
+  if(!names[page])return;state.page=page;document.body.dataset.view=page;document.body.classList.toggle("view-map",page==="map");if(page!=="map")document.body.classList.remove("map-focus");
   if(page==="large"&&!options.preserve){state.mode="large";state.folder="";state.offset=0;state.selected.clear();state.search="";$("#file-search").value="";}
   $$("[data-section]").forEach(s=>s.hidden=s.dataset.section!==page);
-  $$("nav [data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
+  $$("nav [data-page]").forEach(b=>{b.classList.toggle("active",b.dataset.page===page);if(b.dataset.page===page)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
   $("#crumb").textContent=names[page];
   const [eyebrow,title,description]=headings[page];$("#page-eyebrow").textContent=eyebrow;$("#page-title").innerHTML=title;$("#page-description").textContent=description;
   if(page==="large"){if(state.mode==="temporary"){$("#page-title").textContent="Временное — на проверку.";$("#page-description").textContent="Файлы TEMP старше 7 дней. Ничего не выбрано заранее.";}await loadFiles();}
@@ -301,7 +305,7 @@ const desktop=Boolean(window.__CLEANER_ULTRA_DESKTOP__&&window.ipc?.postMessage)
 $("#admin-button").onclick=()=>$("#admin-dialog").showModal();
 $("#confirm-admin").onclick=()=>{if(desktop){$("#admin-dialog").close();window.ipc.postMessage("elevate");}};
 $$("[data-window-command]").forEach(b=>{b.disabled=!desktop;b.onclick=()=>window.ipc?.postMessage(b.dataset.windowCommand);});
-if(desktop){$$(".window-dots,.topbar").forEach(r=>r.addEventListener("mousedown",e=>{if(e.button!==0||e.target.closest("button,a,input,select"))return;e.preventDefault();window.ipc.postMessage(e.detail===2?"maximize":"drag");}));for(const d of ["n","s","e","w","ne","nw","se","sw"]){const edge=node("div",`window-resize window-resize-${d}`);edge.onpointerdown=e=>{if(e.button===0)window.ipc.postMessage(`resize:${d}`);};document.body.append(edge);}}
+if(desktop){$$(".desktop-titlebar,.topbar").forEach(r=>r.addEventListener("mousedown",e=>{if(e.button!==0||e.target.closest("button,a,input,select"))return;e.preventDefault();window.ipc.postMessage(e.detail===2?"maximize":"drag");}));for(const d of ["n","s","e","w","ne","nw","se","sw"]){const edge=node("div",`window-resize window-resize-${d}`);edge.onpointerdown=e=>{if(e.button===0)window.ipc.postMessage(`resize:${d}`);};document.body.append(edge);}}
 async function poll(){try{const wasRunning=state.running;const p=await api("/api/space/progress");const changed=p.id!==state.scan;progress(p);if(changed||(wasRunning&&!state.running))await refresh();}catch(e){console.warn("Progress unavailable",e);}finally{setTimeout(poll,state.running?1000:8000);}}
 async function init(){theme("light",false);try{const session=await api("/api/session");state.token=session.token;state.version=session.version;await refresh();}catch(e){toast(e.message);}poll();}
 init();
