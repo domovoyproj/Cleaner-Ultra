@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0",
+  "startup_removed": 1,
+  "registry_issues_repaired": 2,
+  "typed_restores": 3,
+  "excluded_file_preserved": true,
+  "file_moved_and_restored": true,
+  "cache_freed_bytes": 22,
+  "unowned_cache_file_preserved": true,
+  "power_plan_changed": false,
+  "other_user_data_modified": false
+}

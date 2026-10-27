@@ -4,6 +4,7 @@ pub mod compat;
 pub mod library;
 pub mod maintenance;
 pub mod optimizer;
+pub mod performance;
 pub mod server;
 pub mod space;
 pub mod trim;

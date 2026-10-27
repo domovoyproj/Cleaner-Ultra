@@ -1,3 +1,4 @@
+mod common;
 use cleaner_ultra::space::Space;
 use rusqlite::{Connection, params};
 use std::{
@@ -315,7 +316,7 @@ fn same_size_edit_within_one_second_is_rejected() {
 
 #[test]
 fn space_routes_preserve_media_and_share_persistent_theme() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let temp = tempfile::tempdir().unwrap();
     let library = cleaner_ultra::library::Library::open(temp.path()).unwrap();
     let url = cleaner_ultra::server::serve(library.clone(), 0).unwrap();
@@ -334,8 +335,8 @@ fn space_routes_preserve_media_and_share_persistent_theme() {
             format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
         };
         stream.write_all(text.as_bytes()).unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = common::response(&mut stream);
+        let response = format!("{head}\r\n\r\n{}", String::from_utf8(body).unwrap());
         response
     };
     let session = request("/api/session", None, "");

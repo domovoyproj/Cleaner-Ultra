@@ -277,10 +277,18 @@ fn route(
     let get = |name: &str, default: &str| parameters.get(name).cloned().unwrap_or(default.into());
     let mut value = if *request.method() == Method::Get {
         match path {
+            "/api/performance" => crate::performance::resources()?,
+            "/api/power" => crate::performance::power()?,
+            "/api/cleanup/defaults" => {
+                json!({"temporary_path":std::env::temp_dir().to_string_lossy()})
+            }
+            "/api/cache/status" => library.cache_status()?,
             "/api/apps" => apps.list()?,
             "/api/optimizer/status" => optimizer.status(),
             "/api/history" => maintenance.history()?,
-            "/api/maintenance/backups" => maintenance.backups()?,
+            "/api/maintenance/backups" => {
+                maintenance.backups_page(get("offset", "0").parse().unwrap_or(0))?
+            }
             "/api/space/status" => {
                 let mut info = space.status()?;
                 info["theme"] = json!(library.settings().theme);
@@ -328,6 +336,24 @@ fn route(
                 return Ok((
                     include_bytes!("../cleaner_ultra/web/space.html").to_vec(),
                     "text/html; charset=utf-8".into(),
+                ));
+            }
+            "/wizard.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/wizard.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/cleanup-plan.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/cleanup-plan.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
+                ));
+            }
+            "/performance.js" => {
+                return Ok((
+                    include_bytes!("../cleaner_ultra/web/performance.js").to_vec(),
+                    "text/javascript; charset=utf-8".into(),
                 ));
             }
             "/maintenance.js" => {
@@ -456,8 +482,20 @@ fn route(
         };
         let body: Value = serde_json::from_slice(if bytes.is_empty() { b"{}" } else { &bytes })?;
         match path {
-            "/api/maintenance/scan" => maintenance.scan()?,
-            "/api/maintenance/apply" => {
+            "/api/maintenance/scan" | "/api/startup/scan" => maintenance.scan()?,
+            "/api/registry/scan" => maintenance.scan_scope("registry")?,
+            "/api/power/apply" => {
+                if body["confirmed"].as_bool() != Some(true) {
+                    bail!("Подтвердите смену схемы питания");
+                }
+                crate::performance::set_power(
+                    body["id"].as_str().context_or("Выберите схему")?,
+                    |previous| {
+                        maintenance.record("/api/power/backup", &json!({"previous":previous}))
+                    },
+                )?
+            }
+            "/api/maintenance/apply" | "/api/startup/apply" | "/api/registry/apply" => {
                 if body["confirmed"].as_bool() != Some(true) {
                     bail!("Подтвердите выбранные изменения");
                 }
@@ -471,7 +509,15 @@ fn route(
                             .context_or("Некорректный идентификатор")
                     })
                     .collect::<Result<Vec<_>>>()?;
-                maintenance.apply(&selected, body["action"].as_str().unwrap_or(""))?
+                maintenance.apply_scope(
+                    if path == "/api/registry/apply" {
+                        "registry"
+                    } else {
+                        "startup"
+                    },
+                    &selected,
+                    body["action"].as_str().unwrap_or(""),
+                )?
             }
             "/api/maintenance/restore" => {
                 maintenance.restore(body["id"].as_str().context_or("Выберите резервную копию")?)?
@@ -611,7 +657,16 @@ fn route(
                 library.save_settings(settings)?;
                 json!({"ok":true})
             }
-            "/api/cache" => library.trim_cache()?,
+            "/api/cache" => {
+                if body["all"].as_bool() == Some(true) {
+                    if body["confirmed"].as_bool() != Some(true) {
+                        bail!("Подтвердите очистку кеша");
+                    }
+                    library.clear_cache()?
+                } else {
+                    library.trim_cache()?
+                }
+            }
             "/api/video-preview" => {
                 let id = body["id"].as_i64().context_or("Нет видео")?;
                 library.video_source(id, true)?;
@@ -635,6 +690,9 @@ fn route(
             "/api/space/trash",
             "/api/space/restore",
             "/api/maintenance/apply",
+            "/api/startup/apply",
+            "/api/registry/apply",
+            "/api/power/apply",
             "/api/maintenance/restore",
             "/api/apps/uninstall",
             "/api/cache",
