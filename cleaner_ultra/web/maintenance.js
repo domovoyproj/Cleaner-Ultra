@@ -92,7 +92,7 @@
     const d=await api("/api/history");model.history=d.items;
     $("#history-list").replaceChildren(...d.items.map(h=>{
       const row=node("article","ultra-history");row.append(node("strong","",kinds[h.kind]||h.kind),node("small","",`${h.created} UTC`),node("p","",metrics(h.result).join(" · ")));
-      for(const e of h.result.errors||[])row.append(node("p","ultra-errors",e.message));return row;
+      for(const e of h.result.errors||[])row.append(node("p","ultra-errors",typeof e==="string"?e:e.message));return row;
     }));if(!d.items.length)$("#history-list").append(empty("История пока пуста. Выполненные операции будут сохранены здесь."));
   }
   async function optimizer(){

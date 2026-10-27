@@ -43,7 +43,7 @@ cargo run -- --browser --port 18765 --data .cleaner_ultra/dev
 
 `space.sqlite3` — дисковый снимок и корзина, `library.sqlite3` — медиатека, `maintenance.sqlite3` — резервные копии реестра и история. Все три базы нужны для восстановления. Не удаляйте базы вместе с файлами `-wal`/`-shm`, пока приложение работает.
 
-Новые корзины: `.cleaner_ultra-space-trash` и `.cleaner_ultra-trash`. Старые `.photosort-space-trash` и `.photosort-trash` пропускаются сканированием и поддерживаются при восстановлении старых журналов. Старое имя оставлено только в коде совместимости, тестах миграции и действующем URL GitHub. Репозиторий на GitHub пока остаётся [domovoyproj/PhotoSort](https://github.com/domovoyproj/PhotoSort); его переименование требует доступного интерфейса настроек GitHub.
+Новые корзины: `.cleaner_ultra-space-trash` и `.cleaner_ultra-trash`. Старые `.photosort-space-trash` и `.photosort-trash` пропускаются сканированием и поддерживаются при восстановлении старых журналов. Старое имя оставлено только для совместимости и тестов миграции. Репозиторий переименован в [domovoyproj/Cleaner-Ultra](https://github.com/domovoyproj/Cleaner-Ultra).
 
 ## Разработка и проверки
 
